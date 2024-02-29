@@ -108,7 +108,7 @@ options:
 
 Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
 ```
-> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm --quiet create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
+> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
 Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
 ```
 
@@ -131,5 +131,39 @@ test_checkout/data/small.chr6.bam.bai
 test_checkout/data/small.chr6.bam
 ```
 
-A couple things to note:
-- The key is inferred from the passed directory structure. So 
+# Gotchas and Caveats
+
+### A couple things to note about create:
+
+#### Use `--verbose` with the `--dry-run` option to check what keys and files will be processed. e.g.:
+```
+> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm --verbose create ./test.data_manifest.tsv ./test_checkout/ ./test_data/ --dry-run
+[__main__ : 2024-02-29 12:48:22,915 dm - _find_all_files_and_directories() ] Adding 'test_data' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv
+Add files:   0%|                                                                                                                                                                                                                                                                                                                                  | 0/4 [00:00<?, ?it/s][__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/README' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/README
+[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
+[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam.bai' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam.bai
+[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam
+Add files: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 31126.56it/s]
+```
+
+
+#### The key is inferred from the passed directory structure.
+
+`dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*` yields:
+```
+key     md5sum  size    notes
+data/small.chr6.bam.bai 69ef0af03399b9cfe7037aaaa5cdff7b        97152
+data/small.chr6.bam     100d7d094d19c7eaa2b93a4bb67ecda7        198736
+genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz   f02b28cef526d5ee3d657f010bfbc2bb        283499
+README  ca1ea02c10b7c37f425b9b7dd86d5e11        9
+```
+
+whereas `dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/` yields:
+```
+key     md5sum  size    notes
+test_data/README        ca1ea02c10b7c37f425b9b7dd86d5e11        9
+test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz f02b28cef526d5ee3d657f010bfbc2bb        283499
+test_data/data/small.chr6.bam.bai       69ef0af03399b9cfe7037aaaa5cdff7b        97152
+test_data/data/small.chr6.bam   100d7d094d19c7eaa2b93a4bb67ecda7        198736
+```
+

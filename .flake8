@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 120
+ignore = E303,E401,F811,F405,W503,W504,E226,E402
+extend-ignore = E203, W503, E231
+exclude = .git,migrations/versions/*,env,venv,.eggs,labii**

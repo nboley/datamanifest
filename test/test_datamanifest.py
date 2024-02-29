@@ -27,9 +27,16 @@ from datamanifest.datamanifest import (
     s3_uri_exists,
 )
 
+
 def _find_current_git_hash():
     try:
-        res = subprocess.run("git rev-parse --verify HEAD", shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        res = subprocess.run(
+            "git rev-parse --verify HEAD",
+            shell=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         rv = res.stdout.strip().decode()
         if len(rv) == 0:
             rv = random_string(16)
@@ -40,7 +47,13 @@ def _find_current_git_hash():
 
 def _find_current_git_branch():
     try:
-        res = subprocess.run("git rev-parse --abbrev-ref HEAD", shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        res = subprocess.run(
+            "git rev-parse --abbrev-ref HEAD",
+            shell=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
         rv = res.stdout.strip().decode()
         if len(rv) == 0:
             rv = "UNKNOWN_BRANCH" + random_string(16) + "UNKNOWN_BRANCH"
@@ -102,8 +115,12 @@ def manifest_fname(cleandir):
     manifest_fname = os.path.join(cleandir, "data_manifest.data_manifest.tsv")
     assert not os.path.exists(manifest_fname)
     print(f"Loading manifest: {manifest_fname}")
-    checkout_prefix_base = os.path.normpath(os.path.join(cleandir, f"./{GIT_BRANCH}-data/"))
-    checkout_prefix = os.path.normpath(os.path.join(checkout_prefix_base, "./data_manifest/"))
+    checkout_prefix_base = os.path.normpath(
+        os.path.join(cleandir, f"./{GIT_BRANCH}-data/")
+    )
+    checkout_prefix = os.path.normpath(
+        os.path.join(checkout_prefix_base, "./data_manifest/")
+    )
 
     local_cache_prefix = os.path.normpath(os.path.join(cleandir, "./local_cache"))
     os.makedirs(local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS)
@@ -151,7 +168,10 @@ def manifest_fname(cleandir):
 
 @pytest.mark.parametrize(
     "fname,expected_key",
-    [("test.data_manifest.tsv", "test"), ("/scratch/nboley/test.data_manifest.tsv", "test")],
+    [
+        ("test.data_manifest.tsv", "test"),
+        ("/scratch/nboley/test.data_manifest.tsv", "test"),
+    ],
 )
 def test_get_manifest_key(fname, expected_key):
     assert DataManifest.get_manifest_key(fname) == expected_key
@@ -159,7 +179,9 @@ def test_get_manifest_key(fname, expected_key):
 
 def test_new_dm_on_class_init(cleandir):
     new_dm_path = f"{cleandir}/test_dm.data_manifest.tsv"
-    assert not os.path.exists(new_dm_path), "Test error, the new file shouldn't already be there"
+    assert not os.path.exists(
+        new_dm_path
+    ), "Test error, the new file shouldn't already be there"
     path = __file__
     local_cache_prefix = os.path.normpath(os.path.join(cleandir, "./local_cache"))
     os.makedirs(local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS)
@@ -169,7 +191,12 @@ def test_new_dm_on_class_init(cleandir):
 
     remote_datastore_prefix = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
-    with DataManifestWriter.new(new_dm_path, checkout_prefix=cleandir, local_cache_prefix=local_cache_prefix, remote_datastore_prefix=remote_datastore_prefix) as dmr:
+    with DataManifestWriter.new(
+        new_dm_path,
+        checkout_prefix=cleandir,
+        local_cache_prefix=local_cache_prefix,
+        remote_datastore_prefix=remote_datastore_prefix,
+    ) as dmr:
         dmr.add("this_file", path)
     assert os.path.exists(new_dm_path), f"The new dm {new_dm_path} was not written."
 
@@ -301,12 +328,16 @@ def test_locking_works(manifest_fname):
         ofp.write(payload)
 
     manifest_w1 = DataManifestWriter(manifest_fname)
-    with pytest.raises(RuntimeError, match=r".*?and so it can't be opened for reading.*"):
+    with pytest.raises(
+        RuntimeError, match=r".*?and so it can't be opened for reading.*"
+    ):
         load_data_manifest(manifest_fname)
     manifest_w1.close()
 
     manifest_r2 = load_data_manifest(manifest_fname)
-    with pytest.raises(RuntimeError, match=r".*?and so it can't be opened for writing.*"):
+    with pytest.raises(
+        RuntimeError, match=r".*?and so it can't be opened for writing.*"
+    ):
         DataManifestWriter(manifest_fname)
     manifest_r2.close()
 
@@ -373,7 +404,9 @@ def test_sync(manifest_fname, cleandir2):
     local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data/"))
 
     manifest = load_data_manifest(
-        manifest_fname, checkout_prefix=local_data_path, local_cache_prefix=local_cache_prefix,
+        manifest_fname,
+        checkout_prefix=local_data_path,
+        local_cache_prefix=local_cache_prefix,
     )
     manifest.sync()
 
@@ -392,7 +425,10 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
     local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data/"))
     new_manifest_fname = os.path.abspath("new_manifest.data_manifest.tsv")
     # create a mew manifest, and add a file
-    with DataManifestWriter.new(new_manifest_fname, checkout_prefix=local_data_path,) as new_manifest:
+    with DataManifestWriter.new(
+        new_manifest_fname,
+        checkout_prefix=local_data_path,
+    ) as new_manifest:
         for record in old_manifest_records:
             new_manifest.add(record.key, record.path, notes=record.notes)
         # create a test file, and add it to the data manifest
@@ -404,8 +440,12 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
 
         assert len(new_manifest) != len(old_manifest_records)
 
-    newer_local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data_newer/"))
-    with load_data_manifest(new_manifest_fname, checkout_prefix=newer_local_data_path) as newer_manifest:
+    newer_local_data_path = os.path.normpath(
+        os.path.join(cleandir2, "./local_data_newer/")
+    )
+    with load_data_manifest(
+        new_manifest_fname, checkout_prefix=newer_local_data_path
+    ) as newer_manifest:
         newer_manifest.sync()
         _verify_manifest(newer_manifest)
 
@@ -427,7 +467,9 @@ def test_validate_size_fail(manifest_fname, fast):
         data = ifp.read()
     with open(fname, "w") as ofp:
         ofp.write(data + "EXTRA")
-    with pytest.raises(FileMismatchError, match=r".*?'.+?' has size '\d+' vs '\d+' in the manifest.*"):
+    with pytest.raises(
+        FileMismatchError, match=r".*?'.+?' has size '\d+' vs '\d+' in the manifest.*"
+    ):
         manifest.validate(fast=fast)
 
 
@@ -450,7 +492,8 @@ def test_validate_md5_fail(manifest_fname, fast):
     else:
         assert fast is False
         with pytest.raises(
-            FileMismatchError, match=r".*?'.+?' has md5sum '.+?' vs '.+?' in the manifest/*",
+            FileMismatchError,
+            match=r".*?'.+?' has md5sum '.+?' vs '.+?' in the manifest/*",
         ):
             manifest.validate(fast=fast)
 
@@ -477,7 +520,9 @@ def test_get_no_validate(manifest_fname):
         data = ifp.read()
     with open(record.path, "w") as ofp:
         ofp.write(data + "EXTRA")
-    with pytest.raises(FileMismatchError, match=r".*?'.+?' has size '\d+' vs '\d+' in the manifest.*"):
+    with pytest.raises(
+        FileMismatchError, match=r".*?'.+?' has size '\d+' vs '\d+' in the manifest.*"
+    ):
         manifest.get(record.key)
     manifest.get(record.key, validate=False)
 
@@ -486,7 +531,8 @@ def test_get_no_validate(manifest_fname):
 def test_lazy_load(manifest_fname, cleandir, fast):
     # test that verify fails when there is a size mismatch.
     manifest = load_data_manifest(
-        manifest_fname, checkout_prefix=os.path.normpath(os.path.join(cleandir, "./doesnt_exit/")),
+        manifest_fname,
+        checkout_prefix=os.path.normpath(os.path.join(cleandir, "./doesnt_exit/")),
     )
     keys_iter = iter(manifest.keys())
     key1 = next(keys_iter)

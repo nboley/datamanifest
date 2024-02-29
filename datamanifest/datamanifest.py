@@ -38,7 +38,10 @@ logger = logging.getLogger(__name__)
 
 
 def random_string(length):
-    return "".join([random.choice(string.ascii_letters + string.digits) for n in range(length)])
+    return "".join(
+        [random.choice(string.ascii_letters + string.digits) for n in range(length)]
+    )
+
 
 @contextmanager
 def environment_variables(**kwargs):
@@ -50,6 +53,7 @@ def environment_variables(**kwargs):
         del os.environ[key]
     # re-add the old variables
     os.environ.update(old_env_vars)
+
 
 def s3_uri_exists(s3_uri: str) -> bool:
     """
@@ -108,7 +112,9 @@ def _makedirs_and_change_permissions(path, mode, root):
 
 
 def hex_to_base64(hex_str):
-    return codecs.encode(codecs.decode(hex_str, "hex"), "base64").strip().decode("ascii")
+    return (
+        codecs.encode(codecs.decode(hex_str, "hex"), "base64").strip().decode("ascii")
+    )
 
 
 def calc_md5sum_from_fname(fname):
@@ -126,7 +132,9 @@ def calc_md5sum_from_fp(fp):
     fp.seek(0)
     m.update(fp.read(10000000).encode("utf8"))
     if fp.read(1) != "":
-        raise ValueError(f"{fp.name} is too large to calculate the md5 sum from this function.")
+        raise ValueError(
+            f"{fp.name} is too large to calculate the md5 sum from this function."
+        )
     fp.seek(fpos)
     return m.hexdigest()
 
@@ -151,7 +159,9 @@ def _validate_prefix(prefix, ErrorClass):
         raise ErrorClass(f"{prefix} contains invalid characters")
 
     if prefix != os.path.normpath(prefix):
-        raise ErrorClass(f'{prefix} is not a normalized path, try "{os.path.normpath(prefix)}"')
+        raise ErrorClass(
+            f'{prefix} is not a normalized path, try "{os.path.normpath(prefix)}"'
+        )
 
 
 def validate_key(key):
@@ -165,15 +175,17 @@ def validate_local_prefix(prefix):
     _validate_prefix(prefix, InvalidPrefix)
 
     if prefix != os.path.abspath(prefix):
-        raise InvalidPrefix(f'{prefix} is not an absolute path, try "{os.path.abspath(prefix)}"')
+        raise InvalidPrefix(
+            f'{prefix} is not an absolute path, try "{os.path.abspath(prefix)}"'
+        )
 
 
 def get_data_manifest_path(manifest_key_or_fname):
-    """Get path to a data manifest by passing in a key or fname.
-
-    """
+    """Get path to a data manifest by passing in a key or fname."""
     # if this is a path that exists, then return it
-    if os.path.exists(manifest_key_or_fname) and not os.path.isdir(manifest_key_or_fname):
+    if os.path.exists(manifest_key_or_fname) and not os.path.isdir(
+        manifest_key_or_fname
+    ):
         return manifest_key_or_fname
 
     # if there's not the correct suffix, then add it
@@ -193,7 +205,10 @@ def get_data_manifest_path(manifest_key_or_fname):
 
 
 def load_data_manifest(
-    manifest_fname, checkout_prefix=None, local_cache_prefix=None, remote_datastore_prefix=None
+    manifest_fname,
+    checkout_prefix=None,
+    local_cache_prefix=None,
+    remote_datastore_prefix=None,
 ):
     data_manifest_path = get_data_manifest_path(manifest_fname)
 
@@ -203,7 +218,10 @@ def load_data_manifest(
         # if this data manifest isn't cached, then load it
         if cache_key not in MANIFEST_CACHE:
             MANIFEST_CACHE[cache_key] = DataManifest(
-                data_manifest_path, checkout_prefix, local_cache_prefix, remote_datastore_prefix
+                data_manifest_path,
+                checkout_prefix,
+                local_cache_prefix,
+                remote_datastore_prefix,
             )
         # if this data manifest has already been opened, make sure that the checkout_prefix and remote_datastore_prefix
         # are the same. There's no technical reason that these can't be different, but Dave Lu and Nathan B couldn't
@@ -213,11 +231,13 @@ def load_data_manifest(
         else:
             assert cache_key in MANIFEST_CACHE
             assert (
-                checkout_prefix is None or checkout_prefix == MANIFEST_CACHE[cache_key].checkout_prefix
+                checkout_prefix is None
+                or checkout_prefix == MANIFEST_CACHE[cache_key].checkout_prefix
             ), f"'{checkout_prefix}' does not match '{MANIFEST_CACHE[cache_key].checkout_prefix}'"
             assert (
                 remote_datastore_prefix is None
-                or remote_datastore_prefix == MANIFEST_CACHE[cache_key].remote_datastore_prefix
+                or remote_datastore_prefix
+                == MANIFEST_CACHE[cache_key].remote_datastore_prefix
             ), f"'{remote_datastore_prefix}' does not match '{MANIFEST_CACHE[cache_key].remote_datastore_prefix}'"
 
         # effectively remove the cache
@@ -242,7 +262,9 @@ class RemotePath:
 
     def __post_init__(self):
         if self.scheme != "s3":
-            raise NotImplementedError("DataManifest currently only supports s3 for the remote cache.")
+            raise NotImplementedError(
+                "DataManifest currently only supports s3 for the remote cache."
+            )
         _validate_prefix(self.path, InvalidPrefix)
 
     @property
@@ -279,7 +301,9 @@ class DataManifest:
             fsize,
             notes=notes,
             path=self._build_checkout_path(self.checkout_prefix, key),
-            remote_uri=self._build_remote_datastore_uri(self.remote_datastore_prefix, key, md5sum),
+            remote_uri=self._build_remote_datastore_uri(
+                self.remote_datastore_prefix, key, md5sum
+            ),
         )
 
     @staticmethod
@@ -303,7 +327,9 @@ class DataManifest:
         local_fsize = os.path.getsize(fpath)
         logger.debug(f"Calculated filesize '{local_fsize}' for '{fpath}'.")
         if local_fsize != int(record.size):
-            raise FileMismatchError(f"'{fpath}' has size '{local_fsize}' vs '{record.size}' in the manifest")
+            raise FileMismatchError(
+                f"'{fpath}' has size '{local_fsize}' vs '{record.size}' in the manifest"
+            )
 
         # ensure the md5sum matches
         if check_md5sum:
@@ -314,7 +340,8 @@ class DataManifest:
             )
             if local_md5sum != record.md5sum:
                 raise FileMismatchError(
-                    f"'{fpath}' has md5sum '{local_md5sum}' " f"vs '{record.md5sum}' in the manifest"
+                    f"'{fpath}' has md5sum '{local_md5sum}' "
+                    f"vs '{record.md5sum}' in the manifest"
                 )
 
     def validate_record(self, key, check_md5sum=True):
@@ -331,7 +358,9 @@ class DataManifest:
         if not os.path.exists(local_abs_path):
             raise MissingFileError(f"Can not find '{key}' at '{local_abs_path}'")
 
-        return self._verify_record_matches_file(self._data[key], local_abs_path, check_md5sum=check_md5sum)
+        return self._verify_record_matches_file(
+            self._data[key], local_abs_path, check_md5sum=check_md5sum
+        )
 
     def _update_local_cache(self, key, fast=False, retries=3):
         """Download key from the remote location to the local location."""
@@ -352,7 +381,9 @@ class DataManifest:
                 mins_since_last_modified = 0
 
             if mins_since_last_modified > 30:
-                logger.warning(f"{local_cache_path}.lock is older than 30 minutes, deleting!")
+                logger.warning(
+                    f"{local_cache_path}.lock is older than 30 minutes, deleting!"
+                )
                 os.unlink(local_cache_path + ".lock.lock")
 
         # take out a lockfile to prevent multiple processes from accessing this
@@ -360,7 +391,9 @@ class DataManifest:
         # ensure that the path exists for the lockfile to be created
         if not os.path.exists(os.path.dirname(local_cache_path)):
             # otherwise, if we created this, then ensure that the group is correctly set
-            os.makedirs(local_cache_path, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True)
+            os.makedirs(
+                local_cache_path, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
+            )
 
         lock = lockfile.LockFile(local_cache_path + ".lock")
         with lock:
@@ -369,7 +402,9 @@ class DataManifest:
                 logger.debug(
                     f"'{key}' already exists in the local cache -- validating that it matches the manifest."
                 )
-                self._verify_record_matches_file(self._data[key], local_cache_path, check_md5sum=not fast)
+                self._verify_record_matches_file(
+                    self._data[key], local_cache_path, check_md5sum=not fast
+                )
             else:
                 # if it doesn't then download the file
                 s3 = boto3.resource("s3")
@@ -394,7 +429,9 @@ class DataManifest:
                         time.sleep(random.uniform(10, 60))
 
                 if not downloaded:
-                    logger.error(f"Error downloading '{remote_key}' to '{local_cache_path}'")
+                    logger.error(
+                        f"Error downloading '{remote_key}' to '{local_cache_path}'"
+                    )
                     raise
                 # set the permissions and group
                 os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
@@ -403,7 +440,9 @@ class DataManifest:
         """Create symlink in the local checkout to the local cache"""
         local_cache_path = self.get_local_cache_path(key)
         if not os.path.exists(local_cache_path):
-            raise MissingFileError(f"'{key}' does not exist in the local cache (at '{local_cache_path}')")
+            raise MissingFileError(
+                f"'{key}' does not exist in the local cache (at '{local_cache_path}')"
+            )
 
         local_path = self._data[key].path
         logger.info(f"Linking {local_cache_path} to '{local_path}'.")
@@ -419,7 +458,9 @@ class DataManifest:
             # remove the symlink if it already exists
             if os.path.islink(local_path):
                 old_local_cache_path = os.readlink(local_path)
-                assert not os.path.islink(old_local_cache_path), "We should never have nested links created by the data manifest"
+                assert not os.path.islink(
+                    old_local_cache_path
+                ), "We should never have nested links created by the data manifest"
                 if old_local_cache_path != local_cache_path:
                     os.unlink(local_path)
 
@@ -427,7 +468,9 @@ class DataManifest:
 
     @staticmethod
     def _build_datastore_suffix(key, md5sum):
-        return os.path.join(os.path.dirname(key), f"./{md5sum}-" + os.path.basename(key))
+        return os.path.join(
+            os.path.dirname(key), f"./{md5sum}-" + os.path.basename(key)
+        )
 
     @classmethod
     def _build_remote_datastore_uri(cls, remote_datastore_prefix, key, md5sum):
@@ -435,13 +478,19 @@ class DataManifest:
             remote_datastore_prefix.scheme,
             remote_datastore_prefix.bucket,
             os.path.normpath(
-                os.path.join(remote_datastore_prefix.path, cls._build_datastore_suffix(key, md5sum),)
+                os.path.join(
+                    remote_datastore_prefix.path,
+                    cls._build_datastore_suffix(key, md5sum),
+                )
             ),
         )
 
     def get_local_cache_path(self, key):
         return os.path.normpath(
-            os.path.join(self.local_cache_prefix, self._build_datastore_suffix(key, self._data[key].md5sum),)
+            os.path.join(
+                self.local_cache_prefix,
+                self._build_datastore_suffix(key, self._data[key].md5sum),
+            )
         )
 
     def _build_checkout_path(self, checkout_prefix, key):
@@ -470,16 +519,20 @@ class DataManifest:
         # get local_cache_prefix from the environment if it wasn't passed in
         if local_cache_prefix is None:
             if "LOCAL_DATA_MIRROR_PATH" not in os.environ:
-                raise ValueError("Must either set 'local_cache_prefix' or provide 'LOCAL_DATA_MIRROR_PATH' as an environment variable")
+                raise ValueError(
+                    "Must either set 'local_cache_prefix' or provide 'LOCAL_DATA_MIRROR_PATH' as an environment variable"
+                )
             else:
-                local_cache_prefix = os.environ.get('LOCAL_DATA_MIRROR_PATH')
+                local_cache_prefix = os.environ.get("LOCAL_DATA_MIRROR_PATH")
         local_cache_prefix = os.path.abspath(local_cache_prefix)
         validate_local_prefix(local_cache_prefix)
         if not os.path.exists(local_cache_prefix):
             logger.info(
                 f"The local cache prefix '{local_cache_prefix}' does not exist but we are creating it"
             )
-            os.makedirs(local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True)
+            os.makedirs(
+                local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
+            )
             # I don't think that this should be necessary, but I need this for the permissions to be correct
             # in the docker tests. Looks like there may be a bug with docker mounts.
             os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
@@ -497,7 +550,9 @@ class DataManifest:
         if checkout_prefix is None:
             checkout_prefix = os.environ.get("LOCAL_DATA_PATH")
         if checkout_prefix is None:
-            raise ValueError("Must specify checkout_prefix (through a passed argument or as the LOCAL_DATA_PATH envrionment variable")
+            raise ValueError(
+                "Must specify checkout_prefix (through a passed argument or as the LOCAL_DATA_PATH envrionment variable"
+            )
 
         checkout_prefix = os.path.abspath(checkout_prefix)
         validate_local_prefix(checkout_prefix)
@@ -534,7 +589,7 @@ class DataManifest:
             if line_i <= header_offset:
                 continue
             # skip commented and empty lines
-            if line.startswith('#') or line.strip() == "":
+            if line.startswith("#") or line.strip() == "":
                 continue
 
             # parse and store this record to the ordered dict
@@ -549,16 +604,19 @@ class DataManifest:
                 int(size),
                 notes,
                 path=self._build_checkout_path(self.checkout_prefix, key),
-                remote_uri=self._build_remote_datastore_uri(self.remote_datastore_prefix, key, md5sum),
+                remote_uri=self._build_remote_datastore_uri(
+                    self.remote_datastore_prefix, key, md5sum
+                ),
             )
             if record.key in data:
-                raise KeyAlreadyExistsError(f"'{record.key}' is duplicated in '{self.fname}'")
+                raise KeyAlreadyExistsError(
+                    f"'{record.key}' is duplicated in '{self.fname}'"
+                )
             data[record.key] = record
 
         self._fp.seek(0)
 
         return data
-
 
     def __init__(
         self,
@@ -586,7 +644,9 @@ class DataManifest:
         assert os.path.isfile(self.fname)
 
         # read the header and extract any config values (currently only the remote datastore)
-        self._config, self.header, header_offset = self._read_config_and_header(self._fp)
+        self._config, self.header, header_offset = self._read_config_and_header(
+            self._fp
+        )
 
         # init the local cache prefix, getting the value from the environment if necssary and cresating the
         # directory if it doesn't exist. Perform integrity checks as well.
@@ -603,7 +663,9 @@ class DataManifest:
         if remote_datastore_prefix is None:
             remote_datastore_prefix = os.environ.get("REMOTE_DATA_MIRROR_URI")
         if remote_datastore_prefix is None:
-            raise ValueError("Must specify the remote_datastore_prefix (through a passed argument, as a config option in the data manifest, or as the REMOTE_DATA_MIRROR_URI envrionment variable")
+            raise ValueError(
+                "Must specify the remote_datastore_prefix (through a passed argument, as a config option in the data manifest, or as the REMOTE_DATA_MIRROR_URI envrionment variable"
+            )
         self.remote_datastore_prefix = RemotePath.from_uri(remote_datastore_prefix)
 
         self._data = self._read_records(header_offset)
@@ -721,18 +783,20 @@ class DataManifestWriter(DataManifest):
 
     @classmethod
     def new(
-            cls,
-            manifest_fname,
-            checkout_prefix=None,
-            local_cache_prefix=None,
-            remote_datastore_prefix=None,
-        ):
+        cls,
+        manifest_fname,
+        checkout_prefix=None,
+        local_cache_prefix=None,
+        remote_datastore_prefix=None,
+    ):
         """Create a new data manifest at manifest_fname.
 
         This creates a new empty data manifest, and returns the data manifest object opened in write mode.
         """
         if os.path.exists(manifest_fname):
-            raise FileAlreadyExistsError(f"A data manifest already exists at {manifest_fname}.")
+            raise FileAlreadyExistsError(
+                f"A data manifest already exists at {manifest_fname}."
+            )
 
         # make any sub-directories needed to create the manifest
         basedir = os.path.dirname(manifest_fname)
@@ -762,7 +826,9 @@ class DataManifestWriter(DataManifest):
             while True:
                 dirname, _ = os.path.split(dirname)
                 # don't remove the local cache base directory
-                if os.path.normpath(dirname) == os.path.normpath(self.local_cache_prefix):
+                if os.path.normpath(dirname) == os.path.normpath(
+                    self.local_cache_prefix
+                ):
                     break
                 # remove directories until we find one that's not empty
                 try:
@@ -798,13 +864,17 @@ class DataManifestWriter(DataManifest):
         else:
             # note that remote_key contains the md5 sum of the file, so we know that
             # it's safe to use the existing version
-            logger.warning(f"'{remote_key}' already exists in s3 -- using existing version.")
+            logger.warning(
+                f"'{remote_key}' already exists in s3 -- using existing version."
+            )
 
     def write_tsv(self, ofstream):
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
             # strip off the last two values (path and remote uri)
-            ofstream.write("\t".join(str(x) for x in dataclasses.astuple(record)[:-2]) + "\n")
+            ofstream.write(
+                "\t".join(str(x) for x in dataclasses.astuple(record)[:-2]) + "\n"
+            )
 
     def _save_to_disk(self):
         """Save the current data to disk."""
@@ -842,7 +912,11 @@ class DataManifestWriter(DataManifest):
             )
             self._verify_record_matches_file(self._data[key], local_cache_path)
         else:
-            os.makedirs(os.path.dirname(local_cache_path), mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True)
+            os.makedirs(
+                os.path.dirname(local_cache_path),
+                mode=DEFAULT_FOLDER_PERMISSIONS,
+                exist_ok=True,
+            )
             shutil.copyfile(fname, local_cache_path)
             os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
 
@@ -886,7 +960,9 @@ class DataManifestWriter(DataManifest):
         except KeyAlreadyExistsError:
             if not exists_ok:
                 raise
-            self._verify_record_matches_file(self._data[key], fname_to_add, check_md5sum=False)
+            self._verify_record_matches_file(
+                self._data[key], fname_to_add, check_md5sum=False
+            )
 
     def update(self, key, fname_to_add, notes=""):
         """Update a file that is in the manifest and upload to gcp."""

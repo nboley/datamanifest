@@ -25,7 +25,9 @@ LOG_LEVELS = {
 assert all(logging.getLevelName(value) == level for level, value in LOG_LEVELS.items())
 
 DEFAULT_FILE_DESCRIPTOR_LOG_LEVEL = LOG_LEVELS["INFO"]
-DEFAULT_LOG_FORMAT = "[%(name)s : %(asctime)-15s %(filename)s - %(funcName)s() ] %(message)s"
+DEFAULT_LOG_FORMAT = (
+    "[%(name)s : %(asctime)-15s %(filename)s - %(funcName)s() ] %(message)s"
+)
 
 
 def logger_is_verbose(logger):
@@ -234,7 +236,10 @@ def build_log_parser():
         help="Output debug level log messages (and above) to the output stream.",
     )
     log_parser.add_argument(
-        "--log-format", type=str, default=DEFAULT_LOG_FORMAT, help="Format string to use for log messages.",
+        "--log-format",
+        type=str,
+        default=DEFAULT_LOG_FORMAT,
+        help="Format string to use for log messages.",
     )
 
     log_parser.add_argument(
@@ -264,12 +269,16 @@ def build_log_parser():
     # make sure that --log-file-verbosity-level and --log-file-format are not set
     # if --log-file is not specified
     if args.log_filename is None:
-        if args.log_file_verbosity_level != log_parser.get_default("log_file_verbosity_level"):
+        if args.log_file_verbosity_level != log_parser.get_default(
+            "log_file_verbosity_level"
+        ):
             log_parser.error(
                 "It is not sensible to set --log-file-verbosity-level without specifying --log-filename"
             )
         if args.log_file_format != log_parser.get_default("log_file_format"):
-            log_parser.error("It is not sensible to set --log-file-format without specifying --log-filename")
+            log_parser.error(
+                "It is not sensible to set --log-file-format without specifying --log-filename"
+            )
 
     return parser
 

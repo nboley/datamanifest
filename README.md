@@ -31,10 +31,14 @@ aws s3 ls s3://test-data-manifest-2-2024/
 Shows that the bucket is empty.
 
 ### Populate a Directory with Data
+
+Make a directory to store the data and populate it. In my case I'll use the test data from another project.
 ```
 mkdir test_data
-cp ~/src/data_manifest/test/data/* test_data/
+cp ~/src/fragments_h5/test/data/* test_data/
 ```
+
+`ls -lt` shows the files and sizes. 
 
 ```
 > ls -lt test_data/

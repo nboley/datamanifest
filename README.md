@@ -61,9 +61,9 @@ Global options like `--vebrose` and `--quiet` need to be passed after `dm` but b
 
 ### Create a new data manifest
 
-Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
+Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_MIRROR_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
 ```
-> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
+> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_MIRROR_URI=s3://test-data-manifest-2-2024/test1 dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
 Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
 ```
 

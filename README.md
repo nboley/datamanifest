@@ -54,3 +54,82 @@ total 708
 
 ### Create a New Data Manifest
 
+Running `dm --help` shows all of the sub-commands and options.
+
+```
+> dm --help
+usage: dm [-h] [--quiet | --verbose | --debug] [--log-format LOG_FORMAT] [--log-filename LOG_FILENAME] [--log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}] [--log-file-format LOG_FILE_FORMAT] {add,update,delete,checkout,sync,create,add-multiple} ...
+
+positional arguments:
+  {add,update,delete,checkout,sync,create,add-multiple}
+    add                 add a file to a manifest
+    update              update a record in the manifest
+    delete              delete a file from the manifest
+    checkout            checkout a new data directory from a manifest
+    sync                sync an existing data directory from a manifest
+    create              create a new manifest by traversing a directory
+    add-multiple        add files to a data manifest by traversing a directory. Keys are inferred from relative file path.
+
+options:
+  -h, --help            show this help message and exit
+  --quiet, -q           Only output error log messages (and above) to the output stream.
+  --verbose, -v         Output info level log messages (and above) to the output stream.
+  --debug               Output debug level log messages (and above) to the output stream.
+
+logging:
+  --log-format LOG_FORMAT
+                        Format string to use for log messages.
+  --log-filename LOG_FILENAME
+                        Write log messages to both the default handler and --log-filename. (default: do not write messages to a log file)
+  --log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}
+                        Logging level to use for the log file handler. (default: log all messages)
+  --log-file-format LOG_FILE_FORMAT
+                        Format string to use for log messages written to file (see LogRecord in the logging module docs).
+
+```
+
+Running `dm create --help` shows the options for the sub command.
+
+```
+> dm create --help
+usage: dm create [-h] [--dry-run] [--resume] manifest-path checkout-prefix files-and-directories-to-add [files-and-directories-to-add ...]
+
+positional arguments:
+  manifest-path         Path to data manifest.
+  checkout-prefix       Location of checkout directory.
+  files-and-directories-to-add
+                        Files with which to populate data manifest.
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run             Test without doing anything.
+  --resume              Ignore existing files
+```
+
+Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
+```
+> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm --quiet create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
+Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
+```
+
+Now that the files are added to the manifest we can look at the data manifest and the checkout directory:
+```
+> cat test.data_manifest.tsv
+key     md5sum  size    notes
+data/small.chr6.bam.bai 69ef0af03399b9cfe7037aaaa5cdff7b        97152
+data/small.chr6.bam     100d7d094d19c7eaa2b93a4bb67ecda7        198736
+genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz   f02b28cef526d5ee3d657f010bfbc2bb        283499
+README  ca1ea02c10b7c37f425b9b7dd86d5e11        9
+
+> find test_checkout/
+test_checkout/
+test_checkout/genome
+test_checkout/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
+test_checkout/README
+test_checkout/data
+test_checkout/data/small.chr6.bam.bai
+test_checkout/data/small.chr6.bam
+```
+
+A couple things to note:
+- The key is inferred from the passed directory structure. So 

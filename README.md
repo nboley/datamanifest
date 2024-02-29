@@ -52,59 +52,14 @@ total 708
 -rw-rw-r-- 1 nboley developer  50032 Feb 29 10:56 scATAC_breast_v1_chr6_99118615_99121634.hg38.bam.bai
 ```
 
-### Create a New Data Manifest
+### Using the command line interface
 
-Running `dm --help` shows all of the sub-commands and options.
+Running `dm --help` shows all of the sub-commands and options. 
+Running `dm sub_cmd --help` shows the options for that particular subcommand. 
+Global options like `--vebrose` and `--quiet` need to be passed after `dm` but before the sub-command. e.g. `dm --verbose create` not `dm create --verbose`.
 
-```
-> dm --help
-usage: dm [-h] [--quiet | --verbose | --debug] [--log-format LOG_FORMAT] [--log-filename LOG_FILENAME] [--log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}] [--log-file-format LOG_FILE_FORMAT] {add,update,delete,checkout,sync,create,add-multiple} ...
 
-positional arguments:
-  {add,update,delete,checkout,sync,create,add-multiple}
-    add                 add a file to a manifest
-    update              update a record in the manifest
-    delete              delete a file from the manifest
-    checkout            checkout a new data directory from a manifest
-    sync                sync an existing data directory from a manifest
-    create              create a new manifest by traversing a directory
-    add-multiple        add files to a data manifest by traversing a directory. Keys are inferred from relative file path.
-
-options:
-  -h, --help            show this help message and exit
-  --quiet, -q           Only output error log messages (and above) to the output stream.
-  --verbose, -v         Output info level log messages (and above) to the output stream.
-  --debug               Output debug level log messages (and above) to the output stream.
-
-logging:
-  --log-format LOG_FORMAT
-                        Format string to use for log messages.
-  --log-filename LOG_FILENAME
-                        Write log messages to both the default handler and --log-filename. (default: do not write messages to a log file)
-  --log-file-verbosity-level {CRITICAL,ERROR,WARNING,INFO,DEBUG,NOTSET}
-                        Logging level to use for the log file handler. (default: log all messages)
-  --log-file-format LOG_FILE_FORMAT
-                        Format string to use for log messages written to file (see LogRecord in the logging module docs).
-
-```
-
-Running `dm create --help` shows the options for the sub command.
-
-```
-> dm create --help
-usage: dm create [-h] [--dry-run] [--resume] manifest-path checkout-prefix files-and-directories-to-add [files-and-directories-to-add ...]
-
-positional arguments:
-  manifest-path         Path to data manifest.
-  checkout-prefix       Location of checkout directory.
-  files-and-directories-to-add
-                        Files with which to populate data manifest.
-
-options:
-  -h, --help            show this help message and exit
-  --dry-run             Test without doing anything.
-  --resume              Ignore existing files
-```
+### Create a new data manifest
 
 Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
 ```
@@ -130,6 +85,34 @@ test_checkout/data
 test_checkout/data/small.chr6.bam.bai
 test_checkout/data/small.chr6.bam
 ```
+
+Note that the files under `test_checkout` are symbolic links to LOCAL_DATA_MIRROR_PATH to faciliate fast checkouts. 
+```
+> stat test_checkout/README 
+  File: test_checkout/README -> /tmp/test_dm/ca1ea02c10b7c37f425b9b7dd86d5e11-README
+  Size: 52              Blocks: 0          IO Block: 4096   symbolic link
+Device: 900h/2304d      Inode: 488968007   Links: 1
+Access: (0777/lrwxrwxrwx)  Uid: ( 1001/  nboley)   Gid: ( 5018/developer)
+Access: 2024-02-29 12:58:04.886945490 -0800
+Modify: 2024-02-29 12:56:51.020217023 -0800
+Change: 2024-02-29 12:56:51.020217023 -0800
+ Birth: -
+```
+
+The files have also been mirrored in s3:
+```
+> aws s3 ls --recursive test-data-manifest-2-2024
+2024-02-29 12:59:53          9 test1/ca1ea02c10b7c37f425b9b7dd86d5e11-README
+2024-02-29 12:59:52     198736 test1/data/100d7d094d19c7eaa2b93a4bb67ecda7-small.chr6.bam
+2024-02-29 12:59:51      97152 test1/data/69ef0af03399b9cfe7037aaaa5cdff7b-small.chr6.bam.bai
+2024-02-29 12:59:52     283499 test1/genome/f02b28cef526d5ee3d657f010bfbc2bb-GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
+```
+
+Note that the filenames in both mirrors have been pre-pended with their md5 checksums to allow for versioning.
+
+### Checkout an existing data manifest
+
+
 
 # Gotchas and Caveats
 

@@ -138,7 +138,7 @@ def manifest_fname(cleandir):
     with environment_variables(
         LOCAL_DATA_PATH=checkout_prefix,
         LOCAL_DATA_MIRROR_PATH=local_cache_prefix,
-        REMOTE_DATA_URI=remote_datastore_prefix,
+        REMOTE_DATA_MIRROR_URI=remote_datastore_prefix,
     ):
         yield manifest.fname  # provide the fixture value
 
@@ -169,7 +169,7 @@ def test_new_dm_on_class_init(cleandir):
 
     remote_datastore_prefix = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
-    with DataManifestWriter(new_dm_path, checkout_prefix=cleandir, local_cache_prefix=local_cache_prefix, remote_datastore_prefix=remote_datastore_prefix) as dmr:
+    with DataManifestWriter.new(new_dm_path, checkout_prefix=cleandir, local_cache_prefix=local_cache_prefix, remote_datastore_prefix=remote_datastore_prefix) as dmr:
         dmr.add("this_file", path)
     assert os.path.exists(new_dm_path), f"The new dm {new_dm_path} was not written."
 

@@ -487,7 +487,7 @@ class DataManifest:
         assert os.path.isdir(local_cache_prefix)
         if _extract_permissions(local_cache_prefix) != DEFAULT_FOLDER_PERMISSIONS:
             raise ValueError(
-                f"'Permissions of {self.local_cache_prefix} must be '{DEFAULT_FOLDER_PERMISSIONS}'"
+                f"'Permissions of {local_cache_prefix} must be '{DEFAULT_FOLDER_PERMISSIONS}'"
             )
 
         return local_cache_prefix
@@ -599,11 +599,11 @@ class DataManifest:
         # variables in that order
         remote_datastore_prefix = remote_datastore_prefix
         if remote_datastore_prefix is None:
-            remote_datastore_prefix = self._config.get("REMOTE_DATA_URI")
+            remote_datastore_prefix = self._config.get("REMOTE_DATA_MIRROR_URI")
         if remote_datastore_prefix is None:
-            remote_datastore_prefix = os.environ.get("REMOTE_DATA_URI")
+            remote_datastore_prefix = os.environ.get("REMOTE_DATA_MIRROR_URI")
         if remote_datastore_prefix is None:
-            raise ValueError("Must specify the remote_datastore_prefix (through a passed argument, as a config option in the data manifest, or as the REMOTE_DATA_URI envrionment variable")
+            raise ValueError("Must specify the remote_datastore_prefix (through a passed argument, as a config option in the data manifest, or as the REMOTE_DATA_MIRROR_URI envrionment variable")
         self.remote_datastore_prefix = RemotePath.from_uri(remote_datastore_prefix)
 
         self._data = self._read_records(header_offset)
@@ -704,20 +704,11 @@ class DataManifest:
 
 
 class DataManifestWriter(DataManifest):
-    def __init__(
-        self, manifest_fname: Optional[str] = None, create_manifest_if_missing: bool = True, **kwargs
-    ):
-        if create_manifest_if_missing and manifest_fname is not None and not os.path.exists(manifest_fname):
-            # We need to touch this file and make any needed parent directories
-            basedir = os.path.dirname(manifest_fname)
-            if not os.path.exists(basedir):
-                os.makedirs(basedir)
-            with open(manifest_fname, "w") as outf:
-                print("\t".join(self.default_header()), file=outf)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        super().__init__(manifest_fname, **kwargs)
         # open a non-blocking exclusive lock. This prevents any other process from reading or writing
-        # this data manifest until we've gone out of scope
+        # this data manifest until we've closed the writer.
         fcntl.flock(self._fp, fcntl.LOCK_UN)
         self._fp.close()
         self._fp = open(self.fname, "r+")
@@ -730,21 +721,30 @@ class DataManifestWriter(DataManifest):
 
     @classmethod
     def new(
-        cls, fname, checkout_prefix=None, local_cache_prefix=None, remote_datastore_prefix=None,
-    ):
-        """Create a new data manifest and return the object."""
-        with open(fname, "x") as fp:
-            # FIXME: Seems using dm code from the command line without notes chops off the
-            #  notes column in the tsv. This may be the culprit here. My thought is bin/dm
-            #  passes None as opposed to passing "" as the note, and it gets chopped off
-            # write the header, ignoring the last two field_names (path and remote_uri)
-            fp.write("\t".join(x.name for x in dataclasses.fields(DataManifestRecord)[:-2]))
-        return cls(
-            fname,
-            checkout_prefix=checkout_prefix,
-            local_cache_prefix=local_cache_prefix,
-            remote_datastore_prefix=remote_datastore_prefix,
-        )
+            cls,
+            manifest_fname,
+            checkout_prefix=None,
+            local_cache_prefix=None,
+            remote_datastore_prefix=None,
+        ):
+        """Create a new data manifest at manifest_fname.
+
+        This creates a new empty data manifest, and returns the data manifest object opened in write mode.
+        """
+        if os.path.exists(manifest_fname):
+            raise FileAlreadyExistsError(f"A data manifest already exists at {manifest_fname}.")
+
+        # make any sub-directories needed to create the manifest
+        basedir = os.path.dirname(manifest_fname)
+        if not os.path.exists(basedir):
+            os.makedirs(basedir)
+
+        with open(manifest_fname, "w") as outf:
+            # write the remote datastore uri
+            # write the header
+            print("\t".join(cls.default_header()), file=outf)
+
+        return cls(manifest_fname, *args, **kwargs)
 
     def _delete_from_s3_and_cache(self, key):
         """Delete a file from the local cache and from S3.

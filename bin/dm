@@ -8,25 +8,26 @@ from datamanifest.datamanifest import (
     load_data_manifest,
     DataManifestWriter,
     KeyAlreadyExistsError,
+    FileAlreadyExistsError,
+    random_string,
 )
 
 logger = None
 
 def _find_all_files_and_directories(files_and_directories_to_add, dm_fname):
     rv = []
-    for file_or_dir in files_and_directories_to_add:
-        print(file_or_dir)
-        file_or_dir = os.path.normpath(file_or_dir)
-        logger.info(f"Adding '{file_or_dir}' to {dm_fname}")
-        if os.path.isfile(file_or_dir):
-            key = os.path.normpath(file_or_dir)
-            path = os.path.normpath(os.path.abspath(file_or_dir))
-            rv.append((key, path))
-        elif os.path.isdir(file_or_dir):
-            for root, _, fnames in os.walk(directory_to_add):
-                print(root, fnames)
+    # strip off the common prefix
+    files_and_directories_to_add = [os.path.normpath(x) for x in files_and_directories_to_add]
+    common_prefix = os.path.commonprefix(files_and_directories_to_add) if len(files_and_directories_to_add) > 1 else ''
+    for path in files_and_directories_to_add:
+        logger.info(f"Adding '{path}' to {dm_fname}")
+        if os.path.isfile(path):
+            rv.append((path[len(common_prefix):], path))
+        elif os.path.isdir(path):
+            for root, _, fnames in os.walk(path):
                 for fname in fnames:
-                    key = os.path.normpath(os.path.join(root, fname))
+                    # we add 1 to the common prefix length to strip off the '/'
+                    key = os.path.normpath(os.path.join(root[len(common_prefix):], fname))
                     path = os.path.normpath(os.path.abspath(os.path.join(root, fname)))
                     rv.append((key, path))
         else:
@@ -65,12 +66,27 @@ def add_subdirectory_main(manifest_fname, directory_to_add, checkout_prefix, dry
 
 def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, dry_run, resume):
     assert manifest_fname.endswith(".data_manifest.tsv"), "Should look like NAME.data_manifest.tsv"
-    dm = DataManifestWriter.new(manifest_fname, checkout_prefix=checkout_prefix)
-    _add_subdirectory(
-        dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
-    )
-    if dry_run:
-        os.remove(manifest_fname)
+    if os.path.exists(manifest_fname):
+        raise FileAlreadyExistsError(f"'{manifest_fname}' already exists.")
+
+    try:
+        # we create a temp manifest name in case we run into an error during creation. If we succesfully
+        # finish the operation without raising an exception then we rename the manifest file. Otherwise,
+        # we delete the temporary version.
+        head, tail = os.path.split(manifest_fname)
+        tmp_manifest_fname = os.path.join(head, f"tmp.{random_string(16)}.{tail}")
+        dm = DataManifestWriter.new(tmp_manifest_fname, checkout_prefix=checkout_prefix)
+        _add_subdirectory(
+            dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
+        )
+    except:
+        os.remove(tmp_manifest_fname)
+        raise
+    else:
+        if dry_run:
+            os.remove(tmp_manifest_fname)
+        else:
+            os.rename(tmp_manifest_fname, manifest_fname)
 
 
 def add_main(manifest_fname, key, path, notes):

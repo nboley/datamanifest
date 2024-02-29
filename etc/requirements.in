@@ -1,0 +1,7 @@
+python>=3.10
+boto3
+lockfile
+tqdm
+
+# Testing Requirements
+pytest

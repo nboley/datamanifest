@@ -112,6 +112,24 @@ Note that the filenames in both mirrors have been pre-pended with their md5 chec
 
 ### Checkout an existing data manifest
 
+```
+LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_MIRROR_URI=s3://test-data-manifest-2-2024/test1 dm checkout test.data_manifest.tsv test_checkout_2
+100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 844.01it/s]
+```
+
+Verifying that the links were all created:
+```
+find test_checkout_2/
+test_checkout_2/
+test_checkout_2/genome
+test_checkout_2/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
+test_checkout_2/README
+test_checkout_2/data
+test_checkout_2/data/small.chr6.bam.bai
+test_checkout_2/data/small.chr6.bam
+```
+
+You can use the `--fast` option to skip verifying the md5sums on checkout (it will still verify that the file sizes match so this is pretty safe).
 
 
 # Gotchas and Caveats
@@ -126,7 +144,7 @@ Add files:   0%|                                                                
 [__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
 [__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam.bai' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam.bai
 [__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam
-Add files: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 31126.56it/s]
+Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 31126.56it/s]
 ```
 
 

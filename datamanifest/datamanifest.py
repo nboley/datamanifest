@@ -30,10 +30,6 @@ from .config import (
 )
 
 
-MANIFEST_CACHE = {}
-MANIFEST_CACHE_LOCK = Lock()
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -178,71 +174,6 @@ def validate_local_prefix(prefix):
         raise InvalidPrefix(
             f'{prefix} is not an absolute path, try "{os.path.abspath(prefix)}"'
         )
-
-
-def get_data_manifest_path(manifest_key_or_fname):
-    """Get path to a data manifest by passing in a key or fname."""
-    # if this is a path that exists, then return it
-    if os.path.exists(manifest_key_or_fname) and not os.path.isdir(
-        manifest_key_or_fname
-    ):
-        return manifest_key_or_fname
-
-    # if there's not the correct suffix, then add it
-    if not manifest_key_or_fname.endswith(".data_manifest.tsv"):
-        manifest_fname = manifest_key_or_fname + ".data_manifest.tsv"
-    else:
-        manifest_fname = manifest_key_or_fname
-
-    # look for the data manifest in the data manifest directory
-    data_manifest_root_dir = os.environ.get("DATA_MANIFEST_DIR", DATA_MANIFEST_DIR)
-    data_manifest_path = os.path.join(data_manifest_root_dir, manifest_fname)
-    if not os.path.exists(data_manifest_path):
-        raise ValueError(
-            f"Could not find a data manifest with key or fname '{manifest_key_or_fname}' in '{data_manifest_root_dir}'"
-        )
-    return data_manifest_path
-
-
-def load_data_manifest(
-    manifest_fname,
-    checkout_prefix=None,
-    local_cache_prefix=None,
-    remote_datastore_uri=None,
-):
-    data_manifest_path = get_data_manifest_path(manifest_fname)
-
-    cache_key = data_manifest_path
-    # make sure that accessing the cache is done concurrently
-    with MANIFEST_CACHE_LOCK:
-        # if this data manifest isn't cached, then load it
-        if cache_key not in MANIFEST_CACHE:
-            MANIFEST_CACHE[cache_key] = DataManifest(
-                data_manifest_path,
-                checkout_prefix,
-                local_cache_prefix,
-            )
-        # if this data manifest has already been opened, make sure that the checkout_prefix and remote_datastore_uri
-        # are the same. There's no technical reason that these can't be different, but Dave Lu and Nathan B couldn't
-        # think of a reason why we would want that, and so we'll add an assert assuming it's a bug. If we did want that
-        # behavior for some reason, then we could always just change the cache key to:
-        # (data_manifest_path, checkout_prefix, remote_datastore_uri)
-        else:
-            assert cache_key in MANIFEST_CACHE
-            assert (
-                checkout_prefix is None
-                or checkout_prefix == MANIFEST_CACHE[cache_key].checkout_prefix
-            ), f"'{checkout_prefix}' does not match '{MANIFEST_CACHE[cache_key].checkout_prefix}'"
-            assert (
-                remote_datastore_uri is None
-                or remote_datastore_uri
-                == MANIFEST_CACHE[cache_key].remote_datastore_uri
-            ), f"'{remote_datastore_uri}' does not match '{MANIFEST_CACHE[cache_key].remote_datastore_uri}'"
-
-        # effectively remove the cache
-        dm = MANIFEST_CACHE[data_manifest_path]
-        del MANIFEST_CACHE[data_manifest_path]
-        return dm
 
 
 @dataclasses.dataclass
@@ -776,10 +707,13 @@ class DataManifestWriter(DataManifest):
             )
 
     @staticmethod
-    def _write_config(ofp, remote_datastore_uri):
-        if "=" in remote_datastore_uri:
-            raise ValueError("remote_datastore_uri may not contain '='")
-        print(f"#REMOTE_DATA_MIRROR_URI={remote_datastore_uri}", file=ofp)
+    def _write_config(ofp, keys_and_values):
+        for key, val in keys_and_values.items():
+            if "=" in key:
+                raise ValueError(f"config key '{key}' contains a '='")
+            if "=" in val:
+                raise ValueError(f"config value '{val}' contains a '='")
+            print(f"#{key}={val}", file=ofp)
 
     @classmethod
     def new(
@@ -805,9 +739,12 @@ class DataManifestWriter(DataManifest):
 
         with open(manifest_fname, "x") as ofp:
             # write the remote datastore uri
-            cls._write_config(ofp, remote_datastore_uri)
+            cls._write_config(ofp, {'REMOTE_DATA_MIRROR_URI': remote_datastore_uri})
             # write the header
             print("\t".join(cls.default_header()), file=ofp)
+
+        with open(manifest_fname + ".local_config", "x") as ofp:
+            cls._write_config(ofp, {'CHECKOUT_PREFIX': os.path.normpath(os.path.abspath(checkout_prefix))})
 
         return cls(manifest_fname, checkout_prefix, local_cache_prefix)
 
@@ -870,7 +807,7 @@ class DataManifestWriter(DataManifest):
             )
 
     def write_tsv(self, ofstream):
-        self._write_config(ofstream, self.remote_datastore_uri.uri)
+        self._write_config(ofstream, {'REMOTE_DATA_MIRROR_URI': self.remote_datastore_uri.uri})
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
             # strip off the last two values (path and remote uri)

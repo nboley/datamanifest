@@ -5,7 +5,7 @@ import sys
 
 import datamanifest._logging as logging
 from datamanifest.datamanifest import (
-    load_data_manifest,
+    DataManifest,
     DataManifestWriter,
     KeyAlreadyExistsError,
     FileAlreadyExistsError,
@@ -64,7 +64,7 @@ def add_subdirectory_main(manifest_fname, directory_to_add, checkout_prefix, dry
     )
 
 
-def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, dry_run, resume):
+def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, remote_datastore_uri, dry_run, resume):
     assert manifest_fname.endswith(".data_manifest.tsv"), "Should look like NAME.data_manifest.tsv"
     if os.path.exists(manifest_fname):
         raise FileAlreadyExistsError(f"'{manifest_fname}' already exists.")
@@ -75,18 +75,21 @@ def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, 
         # we delete the temporary version.
         head, tail = os.path.split(manifest_fname)
         tmp_manifest_fname = os.path.join(head, f"tmp.{random_string(16)}.{tail}")
-        dm = DataManifestWriter.new(tmp_manifest_fname, checkout_prefix=checkout_prefix)
+        dm = DataManifestWriter.new(tmp_manifest_fname, remote_datastore_uri=remote_datastore_uri, checkout_prefix=checkout_prefix)
         _add_subdirectory(
             dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
         )
     except:
         os.remove(tmp_manifest_fname)
+        os.remove(tmp_manifest_fname + ".local_config")
         raise
     else:
         if dry_run:
             os.remove(tmp_manifest_fname)
+            os.remove(tmp_manifest_fname + ".local_config")
         else:
             os.rename(tmp_manifest_fname, manifest_fname)
+            os.rename(tmp_manifest_fname + ".local_config", manifest_fname + ".local_config")
 
 
 def add_main(manifest_fname, key, path, notes):
@@ -113,7 +116,7 @@ def delete_main(manifest_fname, key, delete_from_datastore, force_delete=False):
 
 
 def sync_main(manifest_fname, checkout_dir, fast, progress_bar=True):
-    dm = load_data_manifest(manifest_fname, checkout_prefix=checkout_dir)
+    dm = DataManifest(manifest_fname, checkout_prefix=checkout_dir)
     dm.sync(fast=fast, progress_bar=progress_bar)
 
 
@@ -162,17 +165,25 @@ def parse_args():
         subparser.add_argument("--fast", default=False, action="store_true", help="skip the md5sum check")
 
     create_subparser = subparsers.add_parser("create", help="create a new manifest by traversing a directory")
+    create_subparser.add_argument("manifest-path", help="Path to data manifest.")
+    create_subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
+    create_subparser.add_argument("remote-datastore-uri", help="Location of remote datastore.")
+    create_subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
+    create_subparser.add_argument(
+        "--dry-run", action="store_true", help="Test without doing anything.",
+    )
+    create_subparser.add_argument("--resume", action="store_true", help="Ignore existing files")
+
     add_subdirectory_subparser = subparsers.add_parser(
         "add-multiple", help="add files to a data manifest by traversing a directory. Keys are inferred from relative file path.",
     )
-    for subparser in [create_subparser, add_subdirectory_subparser]:
-        subparser.add_argument("manifest-path", help="Path to data manifest.")
-        subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
-        subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
-        subparser.add_argument(
-            "--dry-run", action="store_true", help="Test without doing anything.",
-        )
-        subparser.add_argument("--resume", action="store_true", help="Ignore existing files")
+    add_subdirectory_subparser.add_argument("manifest-path", help="Path to data manifest.")
+    add_subdirectory_subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
+    add_subdirectory_subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
+    add_subdirectory_subparser.add_argument(
+        "--dry-run", action="store_true", help="Test without doing anything.",
+    )
+    add_subdirectory_subparser.add_argument("--resume", action="store_true", help="Ignore existing files")
 
     args = parser.parse_args()
 
@@ -224,6 +235,7 @@ def main():
         create_new_manifest_main(
             manifest_fname=getattr(args, 'manifest-path'),
             directory_to_add=getattr(args, 'files-and-directories-to-add'),
+            remote_datastore_uri=getattr(args, 'remote-datastore-uri'),
             checkout_prefix=getattr(args, 'checkout-prefix'),
             resume=args.resume,
             dry_run=args.dry_run,

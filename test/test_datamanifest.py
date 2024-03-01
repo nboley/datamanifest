@@ -12,7 +12,6 @@ import pytest
 from datamanifest.datamanifest import (
     DataManifest,
     DataManifestWriter,
-    load_data_manifest,
     FileMismatchError,
     KeyAlreadyExistsError,
     InvalidKey,
@@ -20,13 +19,11 @@ from datamanifest.datamanifest import (
     calc_md5sum_from_remote_uri,
     calc_md5sum_from_fname,
     validate_key,
-    MANIFEST_CACHE,
     DEFAULT_FOLDER_PERMISSIONS,
     random_string,
     environment_variables,
     s3_uri_exists,
 )
-
 
 def _find_current_git_hash():
     try:
@@ -331,10 +328,10 @@ def test_locking_works(manifest_fname):
     with pytest.raises(
         RuntimeError, match=r".*?and so it can't be opened for reading.*"
     ):
-        load_data_manifest(manifest_fname)
+        DataManifest(manifest_fname)
     manifest_w1.close()
 
-    manifest_r2 = load_data_manifest(manifest_fname)
+    manifest_r2 = DataManifest(manifest_fname)
     with pytest.raises(
         RuntimeError, match=r".*?and so it can't be opened for writing.*"
     ):
@@ -359,7 +356,7 @@ def test_delete_record(manifest_fname, delete_from_datastore):
     # ensure that there are no records left
     assert len(manifest) == 0
     # ensure that there are no records in a re-loaded manifest
-    manifest = load_data_manifest(manifest_fname)
+    manifest = DataManifest(manifest_fname)
     assert len(manifest) == 0
 
 
@@ -403,7 +400,7 @@ def test_sync(manifest_fname, cleandir2):
     local_cache_prefix = os.path.normpath(os.path.join(cleandir2, "./local_cache/"))
     local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data/"))
 
-    manifest = load_data_manifest(
+    manifest = DataManifest(
         manifest_fname,
         checkout_prefix=local_data_path,
         local_cache_prefix=local_cache_prefix,
@@ -415,7 +412,7 @@ def test_sync(manifest_fname, cleandir2):
 
 def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
     # create the first manifest, and verify that it works
-    with load_data_manifest(manifest_fname) as manifest:
+    with DataManifest(manifest_fname) as manifest:
         manifest.sync()
         # make sure that the manifest matches what's on disk
         _verify_manifest(manifest)
@@ -445,7 +442,7 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
     newer_local_data_path = os.path.normpath(
         os.path.join(cleandir2, "./local_data_newer/")
     )
-    with load_data_manifest(
+    with DataManifest(
         new_manifest_fname, checkout_prefix=newer_local_data_path
     ) as newer_manifest:
         newer_manifest.sync()
@@ -455,14 +452,14 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
 @pytest.mark.parametrize("fast", [True, False])
 def test_validate_success(manifest_fname, fast):
     # test that verify works when everything matches
-    manifest = load_data_manifest(manifest_fname)
+    manifest = DataManifest(manifest_fname)
     manifest.validate(fast=fast)
 
 
 @pytest.mark.parametrize("fast", [True, False])
 def test_validate_size_fail(manifest_fname, fast):
     # test that verify fails when there is a size mismatch.
-    manifest = load_data_manifest(manifest_fname)
+    manifest = DataManifest(manifest_fname)
     # modify one of the files in the cache so that it has the wrong size
     fname = next(iter(manifest)).path
     with open(fname) as ifp:
@@ -478,7 +475,7 @@ def test_validate_size_fail(manifest_fname, fast):
 @pytest.mark.parametrize("fast", [False, True])
 def test_validate_md5_fail(manifest_fname, fast):
     # test that verify fails when there is a size mismatch.
-    manifest = load_data_manifest(manifest_fname)
+    manifest = DataManifest(manifest_fname)
     # modify one of the files in the cache so that it has the wrong size
     fname = next(iter(manifest)).path
     with open(fname) as ifp:
@@ -502,7 +499,7 @@ def test_validate_md5_fail(manifest_fname, fast):
 
 @pytest.mark.parametrize("fast", [False, True])
 def test_rebuild_of_local(manifest_fname, fast):
-    with load_data_manifest(manifest_fname) as dm:
+    with DataManifest(manifest_fname) as dm:
         key = list(dm.keys())[0]
         local_cache_path = dm.get_local_cache_path(key)
         local_checkout_path = dm.get(key).path
@@ -515,7 +512,7 @@ def test_rebuild_of_local(manifest_fname, fast):
 
 def test_get_no_validate(manifest_fname):
     # test that verify fails when there is a size mismatch.
-    manifest = load_data_manifest(manifest_fname)
+    manifest = DataManifest(manifest_fname)
     # modify one of the files in the cache so that it has the wrong size
     record = next(iter(manifest))
     with open(record.path) as ifp:
@@ -532,7 +529,7 @@ def test_get_no_validate(manifest_fname):
 @pytest.mark.parametrize("fast", [False, True])
 def test_lazy_load(manifest_fname, cleandir, fast):
     # test that verify fails when there is a size mismatch.
-    manifest = load_data_manifest(
+    manifest = DataManifest(
         manifest_fname,
         checkout_prefix=os.path.normpath(os.path.join(cleandir, "./doesnt_exit/")),
     )

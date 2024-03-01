@@ -63,9 +63,13 @@ Global options like `--vebrose` and `--quiet` need to be passed after `dm` but b
 
 Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_MIRROR_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
 ```
-> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_MIRROR_URI=s3://test-data-manifest-2-2024/test1 dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*
+> dm create test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://test-data-manifest-2-2024/test1  ./test_data/*
 Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
 ```
+
+`dm create` creates two metadata files:
+- A data manifest tsv that stores remote config info and the file information (`test.data_manifest.tsv`)
+- A local config file that stores the checkout directory and local cache path (`test.data_manifest.tsv.local_config`)
 
 Now that the files are added to the manifest we can look at the data manifest and the checkout directory:
 ```

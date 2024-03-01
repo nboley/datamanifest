@@ -20,6 +20,7 @@ from multiprocessing import Lock
 import random
 from contextlib import contextmanager
 import string
+import tempfile
 
 from tqdm import tqdm
 from urllib.parse import urlparse
@@ -72,6 +73,8 @@ def s3_uri_exists(s3_uri: str) -> bool:
         # The object does exist.
         return True
 
+class MissingLocalConfigError(Exception):
+    pass
 
 class FileAlreadyExistsError(Exception):
     pass
@@ -136,8 +139,6 @@ def calc_md5sum_from_fp(fp):
 
 
 def calc_md5sum_from_remote_uri(remote_path):
-    import tempfile
-
     assert isinstance(remote_path, RemotePath)
     s3 = boto3.resource("s3")
     bucket = s3.Bucket(remote_path.bucket)
@@ -440,61 +441,29 @@ class DataManifest:
         self._fp.close()
 
     @staticmethod
-    def get_manifest_key(fname):
-        assert fname.endswith(".data_manifest.tsv")
-        return os.path.basename(fname)[:-18]
+    def local_config_path(manifest_path):
+        return os.path.normpath(os.path.abspath(manifest_path + ".local_config"))
+
+    @classmethod
+    def _read_local_config(cls, manifest_path):
+        """Read configuration data from the local config file.
+
+        """
+        try:
+            config = {}
+            with open(cls.local_config_path(manifest_path)) as fp:
+                for line_i, line in enumerate(fp):
+                    # skip empty lines
+                    if line.strip() == "":
+                        continue
+                    key, val = line.strip().split("=")
+                    config[key.strip()] = val.strip()
+            return config
+        except:
+            raise MissingLocalConfigError(f"Could not find a local config file at '{cls.local_config_path(manifest_path)}'\nHint: You probably need to run checkout.")
 
     @staticmethod
-    def _init_local_cache(local_cache_prefix):
-        # get local_cache_prefix from the environment if it wasn't passed in
-        if local_cache_prefix is None:
-            if "LOCAL_DATA_MIRROR_PATH" not in os.environ:
-                raise ValueError(
-                    "Must either set 'local_cache_prefix' or provide 'LOCAL_DATA_MIRROR_PATH' as an environment variable"
-                )
-            else:
-                local_cache_prefix = os.environ.get("LOCAL_DATA_MIRROR_PATH")
-        local_cache_prefix = os.path.abspath(local_cache_prefix)
-        validate_local_prefix(local_cache_prefix)
-        if not os.path.exists(local_cache_prefix):
-            logger.info(
-                f"The local cache prefix '{local_cache_prefix}' does not exist but we are creating it"
-            )
-            os.makedirs(
-                local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
-            )
-            # I don't think that this should be necessary, but I need this for the permissions to be correct
-            # in the docker tests. Looks like there may be a bug with docker mounts.
-            os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
-
-        assert os.path.isdir(local_cache_prefix)
-        if _extract_permissions(local_cache_prefix) != DEFAULT_FOLDER_PERMISSIONS:
-            raise ValueError(
-                f"'Permissions of {local_cache_prefix} must be '{DEFAULT_FOLDER_PERMISSIONS}'"
-            )
-
-        return local_cache_prefix
-
-    @staticmethod
-    def _init_checkout_prefix(checkout_prefix):
-        if checkout_prefix is None:
-            checkout_prefix = os.environ.get("LOCAL_DATA_PATH")
-        if checkout_prefix is None:
-            raise ValueError(
-                "Must specify checkout_prefix (through a passed argument or as the LOCAL_DATA_PATH environment variable"
-            )
-
-        checkout_prefix = os.path.abspath(checkout_prefix)
-        validate_local_prefix(checkout_prefix)
-
-        if not os.path.exists(checkout_prefix):
-            os.makedirs(checkout_prefix, exist_ok=True)
-        assert os.path.isdir(checkout_prefix)
-
-        return checkout_prefix
-
-    @staticmethod
-    def _read_config_and_header(fp):
+    def _load_header(fp):
         config = {}
         for line_i, line in enumerate(fp):
             # skip empty lines
@@ -548,18 +517,14 @@ class DataManifest:
 
         return data
 
-    def __init__(
-        self,
-        manifest_fname,
-        checkout_prefix=None,
-        local_cache_prefix=None,
-    ):
+    def __init__(self, manifest_fname):
         """
         :param checkout_prefix: Path where files are located, e.g., /home/uname/projects/Ravel/data
         """
 
+        # first open the manifest file and take out a lock
         self.fname = manifest_fname
-        self.key = self.get_manifest_key(self.fname)
+
         # open the manifest file, and take out a non-blocking shared lock. This guarantees that a
         # writer can't open the same file until this file is released (but other readers can)
         self._fp = open(manifest_fname, "r")
@@ -567,33 +532,123 @@ class DataManifest:
             fcntl.flock(self._fp, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError(
-                f"'{self.fname}' has an exclusive lock from another process, and so it can't be opened for reading"
+                f"'{self.fname}' has an exclusive lock from another process and so it can't be opened for reading"
             )
 
         assert os.path.isfile(self.fname)
 
         # read the header and extract any config values (currently only the remote datastore)
-        self._config, self.header, header_offset = self._read_config_and_header(
+        manifest_config, self.header, header_offset = self._load_header(
             self._fp
         )
-
-        # init the local cache prefix, getting the value from the environment if necssary and cresating the
-        # directory if it doesn't exist. Perform integrity checks as well.
-        self.local_cache_prefix = self._init_local_cache(local_cache_prefix)
-
-        # initialize the checkout directory
-        self.checkout_prefix = self._init_checkout_prefix(checkout_prefix)
-
         # find the remote data store prefix. We use passed argument, data manifest config value, and environment
         # variables in that order
-        remote_datastore_uri = self._config.get("REMOTE_DATA_MIRROR_URI")
+        remote_datastore_uri = manifest_config.get("REMOTE_DATA_MIRROR_URI")
         if remote_datastore_uri is None:
             raise ValueError(
                 "Must specify the remote_datastore_uri as a config option in the data manifest"
             )
         self.remote_datastore_uri = RemotePath.from_uri(remote_datastore_uri)
 
+        self.local_cache_path_suffix = manifest_config["LOCAL_CACHE_PATH_SUFFIX"]
+
+        # the local config file should be written by a call to checkout
+        local_config = self._read_local_config(manifest_fname)
+        try:
+            self.checkout_prefix = local_config['CHECKOUT_PREFIX']
+        except KeyError:
+            raise MissingLocalConfigError(f"CHECKOUT_PREFIX not present in the local config file '{self.local_config_path(manifest_fname)}\nHint: May need to checkout again.'")
+
+        try:
+            self.local_cache_prefix = local_config['LOCAL_CACHE_PREFIX']
+        except KeyError:
+            raise MissingLocalConfigError(f"LOCAL_CACHE_PREFIX not present in the local config file '{self.local_config_path(manifest_fname)}\nHint: May need to checkout again.'")
+
         self._data = self._read_records(header_offset)
+
+
+    @staticmethod
+    def _write_config(ofp, keys_and_values, prepend_hash):
+        for key, val in keys_and_values.items():
+            if "=" in key:
+                raise ValueError(f"config key '{key}' contains a '='")
+            if "=" in val:
+                raise ValueError(f"config value '{val}' contains a '='")
+            print(f"{'#' if prepend_hash else ''}{key}={val}", file=ofp)
+
+
+    @staticmethod
+    def _init_local_cache(local_cache_prefix, local_cache_path_suffix):
+        # get local_cache_prefix from the environment if it wasn't passed in
+        if local_cache_prefix is None:
+            local_cache_prefix = os.environ.get("LOCAL_DATA_MIRROR_PATH", None)
+        if local_cache_prefix is None:
+            tmp_directory = tempfile.gettempdir()
+            local_cache_prefix = os.path.abspath(os.path.join(tmp_directory, local_cache_path_suffix))
+
+        if local_cache_prefix is None:
+            raise ValueError(
+                "Must either set 'local_cache_prefix', provide 'LOCAL_DATA_MIRROR_PATH' as an environment variable, or ensure LOCAL_CACHE_PATH_SUFFIX is set in the data manifest and that tempfile.gettempdir() returns a valid tmp path"
+            )
+
+        # validate the local cache prefix, creating it if necessary
+        local_cache_prefix = os.path.abspath(local_cache_prefix)
+        validate_local_prefix(local_cache_prefix)
+        if not os.path.exists(local_cache_prefix):
+            logger.info(
+                f"The local cache prefix '{local_cache_prefix}' does not exist but we are creating it"
+            )
+            os.makedirs(
+                local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
+            )
+            # I don't think that this should be necessary, but I need this for the permissions to be correct
+            # in the docker tests. Looks like there may be a bug with docker mounts.
+            os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
+
+        assert os.path.isdir(local_cache_prefix)
+        if _extract_permissions(local_cache_prefix) != DEFAULT_FOLDER_PERMISSIONS:
+            raise ValueError(
+                f"'Permissions of {local_cache_prefix} must be '{DEFAULT_FOLDER_PERMISSIONS}'"
+            )
+
+        return local_cache_prefix
+
+    @staticmethod
+    def _init_checkout_prefix(checkout_prefix):
+        checkout_prefix = os.path.abspath(checkout_prefix)
+        validate_local_prefix(checkout_prefix)
+
+        if not os.path.exists(checkout_prefix):
+            os.makedirs(checkout_prefix, exist_ok=True)
+        assert os.path.isdir(checkout_prefix)
+
+        return checkout_prefix
+
+    @classmethod
+    def checkout(cls, manifest_fname, checkout_prefix, local_cache_prefix=None, force=False):
+        """Checkout a data manifest by writing the local config file or raising an error if it already exists.
+
+        """
+        with open(manifest_fname) as fp:
+            manifest_config, _, _ = cls._load_header(fp)
+
+        local_config_path = cls.local_config_path(manifest_fname)
+        checkout_prefix = cls._init_checkout_prefix(checkout_prefix)
+        local_cache_prefix = cls._init_local_cache(local_cache_prefix, manifest_config['LOCAL_CACHE_PATH_SUFFIX'])
+        try:
+            with open(local_config_path, ('w' if force else 'x')) as ofp:
+                cls._write_config(
+                    ofp,
+                    {
+                        'CHECKOUT_PREFIX': checkout_prefix,
+                        'LOCAL_CACHE_PREFIX': local_cache_prefix,
+                    },
+                    prepend_hash=False
+                )
+        except:
+            raise
+
+        return cls(manifest_fname)
 
     def __str__(self):
         return repr(self)
@@ -706,15 +761,6 @@ class DataManifestWriter(DataManifest):
                 f"'{self.fname}' has been opened by another process, and so it can't be opened for writing"
             )
 
-    @staticmethod
-    def _write_config(ofp, keys_and_values):
-        for key, val in keys_and_values.items():
-            if "=" in key:
-                raise ValueError(f"config key '{key}' contains a '='")
-            if "=" in val:
-                raise ValueError(f"config value '{val}' contains a '='")
-            print(f"#{key}={val}", file=ofp)
-
     @classmethod
     def new(
         cls,
@@ -734,19 +780,30 @@ class DataManifestWriter(DataManifest):
 
         # make any sub-directories needed to create the manifest
         basedir = os.path.dirname(manifest_fname)
-        if not os.path.exists(basedir):
+        if basedir != '' and not os.path.exists(basedir):
             os.makedirs(basedir)
+
+        # we use this suffix for any local cache. This allows us to default to using the tmp filesystem in
+        # cases where local_cache_prefix isn't specified
+        local_cache_path_suffix = f"./DATA_MANIFEST_CACHE_{random_string(16)}/"
 
         with open(manifest_fname, "x") as ofp:
             # write the remote datastore uri
-            cls._write_config(ofp, {'REMOTE_DATA_MIRROR_URI': remote_datastore_uri})
+            cls._write_config(
+                ofp,
+                {
+                    'REMOTE_DATA_MIRROR_URI': remote_datastore_uri,
+                    'LOCAL_CACHE_PATH_SUFFIX': local_cache_path_suffix,
+                },
+
+                prepend_hash=True
+            )
             # write the header
             print("\t".join(cls.default_header()), file=ofp)
 
-        with open(manifest_fname + ".local_config", "x") as ofp:
-            cls._write_config(ofp, {'CHECKOUT_PREFIX': os.path.normpath(os.path.abspath(checkout_prefix))})
+        cls.checkout(manifest_fname,  checkout_prefix, local_cache_prefix)
 
-        return cls(manifest_fname, checkout_prefix, local_cache_prefix)
+        return cls(manifest_fname)
 
     def _delete_from_s3_and_cache(self, key):
         """Delete a file from the local cache and from S3.
@@ -807,7 +864,15 @@ class DataManifestWriter(DataManifest):
             )
 
     def write_tsv(self, ofstream):
-        self._write_config(ofstream, {'REMOTE_DATA_MIRROR_URI': self.remote_datastore_uri.uri})
+        self._write_config(
+            ofstream,
+            {
+                'REMOTE_DATA_MIRROR_URI': self.remote_datastore_uri.uri,
+                'LOCAL_CACHE_PATH_SUFFIX': self.local_cache_path_suffix,
+            },
+
+            prepend_hash=True
+        )
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
             # strip off the last two values (path and remote uri)

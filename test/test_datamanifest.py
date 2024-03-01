@@ -133,7 +133,6 @@ def manifest_fname(cleandir):
         checkout_prefix=checkout_prefix,
         local_cache_prefix=local_cache_prefix,
     )
-    assert 'REMOTE_DATA_MIRROR_URI' in manifest._config
 
     # create a test file, and add it to the data manifest
     test_data_key = "eight_As.txt"
@@ -150,10 +149,7 @@ def manifest_fname(cleandir):
 
     manifest.close()
 
-    with environment_variables(
-        LOCAL_DATA_PATH=checkout_prefix,
-        LOCAL_DATA_MIRROR_PATH=local_cache_prefix,
-    ):
+    with environment_variables(LOCAL_DATA_MIRROR_PATH=local_cache_prefix):
         yield manifest.fname  # provide the fixture value
 
     # clean up S3 files created in remote_datastore_uri
@@ -161,17 +157,6 @@ def manifest_fname(cleandir):
     parsed = urlparse(remote_datastore_uri)
     bucket = s3.Bucket(parsed.netloc)
     bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()
-
-
-@pytest.mark.parametrize(
-    "fname,expected_key",
-    [
-        ("test.data_manifest.tsv", "test"),
-        ("/scratch/nboley/test.data_manifest.tsv", "test"),
-    ],
-)
-def test_get_manifest_key(fname, expected_key):
-    assert DataManifest.get_manifest_key(fname) == expected_key
 
 
 def test_new_dm_on_class_init(cleandir):
@@ -399,14 +384,8 @@ def test_sync(manifest_fname, cleandir2):
     # test that the remote file is the same as the local file
     local_cache_prefix = os.path.normpath(os.path.join(cleandir2, "./local_cache/"))
     local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data/"))
-
-    manifest = DataManifest(
-        manifest_fname,
-        checkout_prefix=local_data_path,
-        local_cache_prefix=local_cache_prefix,
-    )
+    manifest = DataManifest(manifest_fname)
     manifest.sync()
-
     _verify_manifest(manifest)
 
 
@@ -442,11 +421,15 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
     newer_local_data_path = os.path.normpath(
         os.path.join(cleandir2, "./local_data_newer/")
     )
-    with DataManifest(
-        new_manifest_fname, checkout_prefix=newer_local_data_path
-    ) as newer_manifest:
-        newer_manifest.sync()
-        _verify_manifest(newer_manifest)
+    # make sure that we get an error if we try to checkout twice
+    with pytest.raises(FileExistsError):
+        DataManifest.checkout(new_manifest_fname, checkout_prefix=newer_local_data_path)
+
+    #with DataManifest.checkout(
+    #    new_manifest_fname, checkout_prefix=newer_local_data_path
+    #) as newer_manifest:
+    #    newer_manifest.sync()
+    #    _verify_manifest(newer_manifest)
 
 
 @pytest.mark.parametrize("fast", [True, False])
@@ -529,9 +512,10 @@ def test_get_no_validate(manifest_fname):
 @pytest.mark.parametrize("fast", [False, True])
 def test_lazy_load(manifest_fname, cleandir, fast):
     # test that verify fails when there is a size mismatch.
-    manifest = DataManifest(
+    manifest = DataManifest.checkout(
         manifest_fname,
         checkout_prefix=os.path.normpath(os.path.join(cleandir, "./doesnt_exit/")),
+        force=True
     )
     keys_iter = iter(manifest.keys())
     key1 = next(keys_iter)

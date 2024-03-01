@@ -80,16 +80,18 @@ def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, 
             dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
         )
     except:
-        os.remove(tmp_manifest_fname)
-        os.remove(tmp_manifest_fname + ".local_config")
+        if os.path.exists(tmp_manifest_fname):
+            os.remove(tmp_manifest_fname)
+        if os.path.exists(DataManifestWriter.local_config_path(tmp_manifest_fname)):
+            os.remove(DataManifestWriter.local_config_path(tmp_manifest_fname))
         raise
     else:
         if dry_run:
             os.remove(tmp_manifest_fname)
-            os.remove(tmp_manifest_fname + ".local_config")
+            os.remove(DataManifestWriter.local_config_path(".local_config"))
         else:
             os.rename(tmp_manifest_fname, manifest_fname)
-            os.rename(tmp_manifest_fname + ".local_config", manifest_fname + ".local_config")
+            os.rename(DataManifestWriter.local_config_path(tmp_manifest_fname), DataManifestWriter.local_config_path(manifest_fname))
 
 
 def add_main(manifest_fname, key, path, notes):
@@ -115,18 +117,20 @@ def delete_main(manifest_fname, key, delete_from_datastore, force_delete=False):
     dm.delete(key, delete_from_datastore=delete_from_datastore)
 
 
-def sync_main(manifest_fname, checkout_dir, fast, progress_bar=True):
-    dm = DataManifest(manifest_fname, checkout_prefix=checkout_dir)
+def sync_main(manifest_fname, fast, progress_bar=True):
+    dm = DataManifest(manifest_fname)
     dm.sync(fast=fast, progress_bar=progress_bar)
 
 
-def checkout_main(manifest_fname, checkout_dir, fast, progress_bar=True):
+def checkout_main(manifest_fname, checkout_dir, sync=False, fast=False, progress_bar=True):
     if os.path.exists(checkout_dir):
         raise ValueError(
             f"Checkout directory '{checkout_dir}' already exists."
             "\nHint: Use sync to update an existing directory."
         )
-    sync_main(manifest_fname, checkout_dir, fast, progress_bar)
+    dm = DataManifest.checkout(manifest_fname, checkout_prefix=checkout_dir)
+    if sync:
+        dm.sync(fast=fast, progress_bar=progress_bar)
 
 
 def parse_args():
@@ -136,6 +140,28 @@ def parse_args():
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
+
+    create_subparser = subparsers.add_parser("create", help="create a new manifest by traversing a directory")
+    create_subparser.add_argument("manifest-path", help="Path to data manifest.")
+    create_subparser.add_argument("--checkout-prefix", required=True, help="Location of checkout directory.")
+    create_subparser.add_argument("--remote-datastore-uri", required=True, help="Location of remote datastore.")
+    create_subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
+    create_subparser.add_argument(
+        "--dry-run", action="store_true", help="Test without doing anything.",
+    )
+    create_subparser.add_argument("--resume", action="store_true", help="Ignore existing files")
+
+    checkout_subparser = subparsers.add_parser(
+        "checkout", help="checkout a new data directory from a manifest"
+    )
+    checkout_subparser.add_argument("manifest-path", help="Path to data manifest.")
+    checkout_subparser.add_argument("--checkout-prefix", required=True, help="Location of checkout directory.")
+    checkout_subparser.add_argument("--sync", default=False, action="store_true", help="Sync all remote data")
+    checkout_subparser.add_argument("--fast", default=False, action="store_true", help="skip the md5sum check")
+
+    sync_subparser = subparsers.add_parser("sync", help="sync an existing data directory from a manifest")
+    sync_subparser.add_argument("manifest-path", help="Path to data manifest.")
+    sync_subparser.add_argument("--fast", default=False, action="store_true", help="skip the md5sum check")
 
     add_subparser = subparsers.add_parser("add", help="add a file to a manifest")
     update_subparser = subparsers.add_parser("update", help="update a record in the manifest")
@@ -155,30 +181,10 @@ def parse_args():
         help="Delete the file from the datastore.",
     )
 
-    checkout_subparser = subparsers.add_parser(
-        "checkout", help="checkout a new data directory from a manifest"
-    )
-    sync_subparser = subparsers.add_parser("sync", help="sync an existing data directory from a manifest")
-    for subparser in [checkout_subparser, sync_subparser]:
-        subparser.add_argument("manifest-path", help="Path to data manifest.")
-        subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
-        subparser.add_argument("--fast", default=False, action="store_true", help="skip the md5sum check")
-
-    create_subparser = subparsers.add_parser("create", help="create a new manifest by traversing a directory")
-    create_subparser.add_argument("manifest-path", help="Path to data manifest.")
-    create_subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
-    create_subparser.add_argument("remote-datastore-uri", help="Location of remote datastore.")
-    create_subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
-    create_subparser.add_argument(
-        "--dry-run", action="store_true", help="Test without doing anything.",
-    )
-    create_subparser.add_argument("--resume", action="store_true", help="Ignore existing files")
-
     add_subdirectory_subparser = subparsers.add_parser(
         "add-multiple", help="add files to a data manifest by traversing a directory. Keys are inferred from relative file path.",
     )
     add_subdirectory_subparser.add_argument("manifest-path", help="Path to data manifest.")
-    add_subdirectory_subparser.add_argument("checkout-prefix", help="Location of checkout directory.")
     add_subdirectory_subparser.add_argument("files-and-directories-to-add", nargs='+', help="Files with which to populate data manifest.")
     add_subdirectory_subparser.add_argument(
         "--dry-run", action="store_true", help="Test without doing anything.",
@@ -199,7 +205,7 @@ def parse_args():
     ):
         # if the checkout prefix is not absolute, then make it relative to the manifest
         rel_path = args.checkout_prefix
-        abs_manifest_base_path = os.path.dirname(os.path.normpath(os.path.abspath(getattr(args, 'manifest_path'))))
+        abs_manifest_base_path = os.path.dirname(os.path.normpath(os.path.abspath(getattr(args, 'manifest-path'))))
         assert os.path.isabs(abs_manifest_base_path)
         args.checkout_prefix = os.path.normpath(os.path.join(abs_manifest_base_path, rel_path))
         logger.warning(f"Changing the relative checkout prefix path '{rel_path}' to '{args.checkout_prefix}'")
@@ -211,11 +217,15 @@ def main():
     args = parse_args()
     if args.command == "checkout":
         checkout_main(
-            getattr(args, 'manifest-path'), getattr(args, 'checkout-prefix'), args.fast, progress_bar=(not args.quiet),
+            getattr(args, 'manifest-path'),
+            getattr(args, 'checkout_prefix'),
+            args.sync,
+            args.fast,
+            progress_bar=(not args.quiet),
         )
     elif args.command == "sync":
         sync_main(
-            getattr(args, 'manifest-path'), getattr(args, 'checkout-prefix'), args.fast, progress_bar=(not args.quiet),
+            getattr(args, 'manifest-path'), args.fast, progress_bar=(not args.quiet),
         )
     elif args.command == "add":
         add_main(getattr(args, 'manifest-path'), args.key, args.path, args.notes)
@@ -235,8 +245,8 @@ def main():
         create_new_manifest_main(
             manifest_fname=getattr(args, 'manifest-path'),
             directory_to_add=getattr(args, 'files-and-directories-to-add'),
-            remote_datastore_uri=getattr(args, 'remote-datastore-uri'),
-            checkout_prefix=getattr(args, 'checkout-prefix'),
+            remote_datastore_uri=getattr(args, 'remote_datastore_uri'),
+            checkout_prefix=getattr(args, 'checkout_prefix'),
             resume=args.resume,
             dry_run=args.dry_run,
         )

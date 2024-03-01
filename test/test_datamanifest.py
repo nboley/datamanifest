@@ -128,14 +128,15 @@ def manifest_fname(cleandir):
     # or docker mounts.
     os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
 
-    remote_datastore_prefix = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
     manifest = DataManifestWriter.new(
         manifest_fname,
+        remote_datastore_uri,
         checkout_prefix=checkout_prefix,
         local_cache_prefix=local_cache_prefix,
-        remote_datastore_prefix=remote_datastore_prefix,
     )
+    assert 'REMOTE_DATA_MIRROR_URI' in manifest._config
 
     # create a test file, and add it to the data manifest
     test_data_key = "eight_As.txt"
@@ -155,13 +156,12 @@ def manifest_fname(cleandir):
     with environment_variables(
         LOCAL_DATA_PATH=checkout_prefix,
         LOCAL_DATA_MIRROR_PATH=local_cache_prefix,
-        REMOTE_DATA_MIRROR_URI=remote_datastore_prefix,
     ):
         yield manifest.fname  # provide the fixture value
 
-    # clean up S3 files created in remote_datastore_prefix
+    # clean up S3 files created in remote_datastore_uri
     s3 = boto3.resource("s3")
-    parsed = urlparse(remote_datastore_prefix)
+    parsed = urlparse(remote_datastore_uri)
     bucket = s3.Bucket(parsed.netloc)
     bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()
 
@@ -189,13 +189,13 @@ def test_new_dm_on_class_init(cleandir):
     # or docker mounts.
     os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
 
-    remote_datastore_prefix = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
     with DataManifestWriter.new(
         new_dm_path,
+        remote_datastore_uri,
         checkout_prefix=cleandir,
         local_cache_prefix=local_cache_prefix,
-        remote_datastore_prefix=remote_datastore_prefix,
     ) as dmr:
         dmr.add("this_file", path)
     assert os.path.exists(new_dm_path), f"The new dm {new_dm_path} was not written."
@@ -424,9 +424,11 @@ def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
     # test that we can sync a data manifest to a new directory with an existing cache
     local_data_path = os.path.normpath(os.path.join(cleandir2, "./local_data/"))
     new_manifest_fname = os.path.abspath("new_manifest.data_manifest.tsv")
+
     # create a mew manifest, and add a file
     with DataManifestWriter.new(
         new_manifest_fname,
+        manifest.remote_datastore_uri.uri,
         checkout_prefix=local_data_path,
     ) as new_manifest:
         for record in old_manifest_records:

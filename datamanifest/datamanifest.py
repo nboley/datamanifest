@@ -208,7 +208,7 @@ def load_data_manifest(
     manifest_fname,
     checkout_prefix=None,
     local_cache_prefix=None,
-    remote_datastore_prefix=None,
+    remote_datastore_uri=None,
 ):
     data_manifest_path = get_data_manifest_path(manifest_fname)
 
@@ -221,13 +221,12 @@ def load_data_manifest(
                 data_manifest_path,
                 checkout_prefix,
                 local_cache_prefix,
-                remote_datastore_prefix,
             )
-        # if this data manifest has already been opened, make sure that the checkout_prefix and remote_datastore_prefix
+        # if this data manifest has already been opened, make sure that the checkout_prefix and remote_datastore_uri
         # are the same. There's no technical reason that these can't be different, but Dave Lu and Nathan B couldn't
         # think of a reason why we would want that, and so we'll add an assert assuming it's a bug. If we did want that
         # behavior for some reason, then we could always just change the cache key to:
-        # (data_manifest_path, checkout_prefix, remote_datastore_prefix)
+        # (data_manifest_path, checkout_prefix, remote_datastore_uri)
         else:
             assert cache_key in MANIFEST_CACHE
             assert (
@@ -235,10 +234,10 @@ def load_data_manifest(
                 or checkout_prefix == MANIFEST_CACHE[cache_key].checkout_prefix
             ), f"'{checkout_prefix}' does not match '{MANIFEST_CACHE[cache_key].checkout_prefix}'"
             assert (
-                remote_datastore_prefix is None
-                or remote_datastore_prefix
-                == MANIFEST_CACHE[cache_key].remote_datastore_prefix
-            ), f"'{remote_datastore_prefix}' does not match '{MANIFEST_CACHE[cache_key].remote_datastore_prefix}'"
+                remote_datastore_uri is None
+                or remote_datastore_uri
+                == MANIFEST_CACHE[cache_key].remote_datastore_uri
+            ), f"'{remote_datastore_uri}' does not match '{MANIFEST_CACHE[cache_key].remote_datastore_uri}'"
 
         # effectively remove the cache
         dm = MANIFEST_CACHE[data_manifest_path]
@@ -302,7 +301,7 @@ class DataManifest:
             notes=notes,
             path=self._build_checkout_path(self.checkout_prefix, key),
             remote_uri=self._build_remote_datastore_uri(
-                self.remote_datastore_prefix, key, md5sum
+                self.remote_datastore_uri, key, md5sum
             ),
         )
 
@@ -408,7 +407,7 @@ class DataManifest:
             else:
                 # if it doesn't then download the file
                 s3 = boto3.resource("s3")
-                bucket = s3.Bucket(self.remote_datastore_prefix.bucket)
+                bucket = s3.Bucket(self.remote_datastore_uri.bucket)
                 remote_key = self._data[key].remote_uri.path
                 logger.info(f"Setting remote key to '{remote_key}'.")
                 remote_object = bucket.Object(remote_key)
@@ -473,13 +472,13 @@ class DataManifest:
         )
 
     @classmethod
-    def _build_remote_datastore_uri(cls, remote_datastore_prefix, key, md5sum):
+    def _build_remote_datastore_uri(cls, remote_datastore_uri, key, md5sum):
         return RemotePath(
-            remote_datastore_prefix.scheme,
-            remote_datastore_prefix.bucket,
+            remote_datastore_uri.scheme,
+            remote_datastore_uri.bucket,
             os.path.normpath(
                 os.path.join(
-                    remote_datastore_prefix.path,
+                    remote_datastore_uri.path,
                     cls._build_datastore_suffix(key, md5sum),
                 )
             ),
@@ -551,7 +550,7 @@ class DataManifest:
             checkout_prefix = os.environ.get("LOCAL_DATA_PATH")
         if checkout_prefix is None:
             raise ValueError(
-                "Must specify checkout_prefix (through a passed argument or as the LOCAL_DATA_PATH envrionment variable"
+                "Must specify checkout_prefix (through a passed argument or as the LOCAL_DATA_PATH environment variable"
             )
 
         checkout_prefix = os.path.abspath(checkout_prefix)
@@ -571,7 +570,7 @@ class DataManifest:
             if line.strip() == "":
                 continue
             if line.startswith("#"):
-                key, val = line.strip().split("=")
+                key, val = line[1:].strip().split("=")
                 config[key.strip()] = val.strip()
             else:
                 # assume that we're to the header now
@@ -605,7 +604,7 @@ class DataManifest:
                 notes,
                 path=self._build_checkout_path(self.checkout_prefix, key),
                 remote_uri=self._build_remote_datastore_uri(
-                    self.remote_datastore_prefix, key, md5sum
+                    self.remote_datastore_uri, key, md5sum
                 ),
             )
             if record.key in data:
@@ -623,7 +622,6 @@ class DataManifest:
         manifest_fname,
         checkout_prefix=None,
         local_cache_prefix=None,
-        remote_datastore_prefix=None,
     ):
         """
         :param checkout_prefix: Path where files are located, e.g., /home/uname/projects/Ravel/data
@@ -657,16 +655,12 @@ class DataManifest:
 
         # find the remote data store prefix. We use passed argument, data manifest config value, and environment
         # variables in that order
-        remote_datastore_prefix = remote_datastore_prefix
-        if remote_datastore_prefix is None:
-            remote_datastore_prefix = self._config.get("REMOTE_DATA_MIRROR_URI")
-        if remote_datastore_prefix is None:
-            remote_datastore_prefix = os.environ.get("REMOTE_DATA_MIRROR_URI")
-        if remote_datastore_prefix is None:
+        remote_datastore_uri = self._config.get("REMOTE_DATA_MIRROR_URI")
+        if remote_datastore_uri is None:
             raise ValueError(
-                "Must specify the remote_datastore_prefix (through a passed argument, as a config option in the data manifest, or as the REMOTE_DATA_MIRROR_URI envrionment variable"
+                "Must specify the remote_datastore_uri as a config option in the data manifest"
             )
-        self.remote_datastore_prefix = RemotePath.from_uri(remote_datastore_prefix)
+        self.remote_datastore_uri = RemotePath.from_uri(remote_datastore_uri)
 
         self._data = self._read_records(header_offset)
 
@@ -679,7 +673,7 @@ class DataManifest:
             f"fname='{self.fname}', "
             f"checkout_prefix='{self.checkout_prefix}', "
             f"local_cache_prefix='{self.local_cache_prefix}', "
-            f"remote_datastore_prefix='{self.remote_datastore_prefix.uri}')"
+            f"remote_datastore_uri='{self.remote_datastore_uri.uri}')"
         )
 
     def __contains__(self, key):
@@ -781,13 +775,19 @@ class DataManifestWriter(DataManifest):
                 f"'{self.fname}' has been opened by another process, and so it can't be opened for writing"
             )
 
+    @staticmethod
+    def _write_config(ofp, remote_datastore_uri):
+        if "=" in remote_datastore_uri:
+            raise ValueError("remote_datastore_uri may not contain '='")
+        print(f"#REMOTE_DATA_MIRROR_URI={remote_datastore_uri}", file=ofp)
+
     @classmethod
     def new(
         cls,
         manifest_fname,
+        remote_datastore_uri,
         checkout_prefix=None,
         local_cache_prefix=None,
-        remote_datastore_prefix=None,
     ):
         """Create a new data manifest at manifest_fname.
 
@@ -803,12 +803,13 @@ class DataManifestWriter(DataManifest):
         if not os.path.exists(basedir):
             os.makedirs(basedir)
 
-        with open(manifest_fname, "w") as outf:
+        with open(manifest_fname, "x") as ofp:
             # write the remote datastore uri
+            cls._write_config(ofp, remote_datastore_uri)
             # write the header
-            print("\t".join(cls.default_header()), file=outf)
+            print("\t".join(cls.default_header()), file=ofp)
 
-        return cls(manifest_fname, *args, **kwargs)
+        return cls(manifest_fname, checkout_prefix, local_cache_prefix)
 
     def _delete_from_s3_and_cache(self, key):
         """Delete a file from the local cache and from S3.
@@ -869,6 +870,7 @@ class DataManifestWriter(DataManifest):
             )
 
     def write_tsv(self, ofstream):
+        self._write_config(ofstream, self.remote_datastore_uri.uri)
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
             # strip off the last two values (path and remote uri)

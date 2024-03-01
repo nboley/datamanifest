@@ -168,3 +168,4 @@ test_data/data/small.chr6.bam.bai       69ef0af03399b9cfe7037aaaa5cdff7b        
 test_data/data/small.chr6.bam   100d7d094d19c7eaa2b93a4bb67ecda7        198736
 ```
 
+

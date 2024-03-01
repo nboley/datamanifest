@@ -1,4 +1,4 @@
-ravel/learn/cfdna_into_m3k4me3_counts/sadeh_cfChIP_seq/src/SetupFiles/
+*.data_manifest.tsv.local_config
 
 *.terraform*
 prof/

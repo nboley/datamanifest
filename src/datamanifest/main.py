@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import os
 from tqdm import tqdm
 import sys

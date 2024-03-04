@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datamanifest"
+version = "1.0.0"
+dependencies = [
+  "boto3",
+  "lockfile",
+  "tqdm",
+]
+requires-python = ">=3.6"
+authors = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+maintainers = [
+  {name = "Nathan Boley", email = "npboley@gmail.com"},
+]
+description = "Lightweight tool and python library for storing and versioning collections of bioinformatics data"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = []
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python"
+]
+
+[project.urls]
+Repository = "https://github.com/nboley/datamanifest"
+
+[project.scripts]
+dm = "datamanifest.main:main"

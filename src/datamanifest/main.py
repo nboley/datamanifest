@@ -30,7 +30,7 @@ def _find_all_files_and_directories(files_and_directories_to_add, dm_fname):
                     path = os.path.normpath(os.path.abspath(os.path.join(root, fname)))
                     rv.append((key, path))
         else:
-            raise ValueError(f"Passed file or directory '{file_or_dir}' does not appear to be a file or directory.")
+            raise ValueError(f"Passed file or directory '{path}' does not appear to be a file or directory.")
     return rv
 
 

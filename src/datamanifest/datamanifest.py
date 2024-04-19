@@ -323,7 +323,7 @@ class DataManifest:
         if not os.path.exists(os.path.dirname(local_cache_path)):
             # otherwise, if we created this, then ensure that the group is correctly set
             os.makedirs(
-                local_cache_path, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
+                os.path.dirname(local_cache_path), mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
             )
 
         lock = lockfile.LockFile(local_cache_path + ".lock")
@@ -710,11 +710,8 @@ class DataManifest:
 
         assert fast in [True, False]
 
-        def sync_record(key):
-            self.sync_record(key, fast=fast)
-
         for key in tqdm(self.keys(), disable=not progress_bar):
-            sync_record(key)
+            self.sync_record(key, fast=fast)
         return
 
         ## Parallel version -- pretty buggy

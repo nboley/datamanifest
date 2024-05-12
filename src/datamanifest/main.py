@@ -56,8 +56,8 @@ def _add_subdirectory(dm, files_and_directories_to_add, resume=False, dry_run=Fa
                 logger.warning(f"'{key}' already exists in manifest, but resume is set so skipping.")
 
 
-def add_subdirectory_main(manifest_fname, directory_to_add, checkout_prefix, dry_run, resume):
-    dm = DataManifestWriter(manifest_fname, checkout_prefix=checkout_prefix)
+def add_subdirectory_main(manifest_fname, directory_to_add, dry_run, resume):
+    dm = DataManifestWriter(manifest_fname)
     _add_subdirectory(
         dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
     )
@@ -232,11 +232,11 @@ def main():
         update_main(getattr(args, 'manifest-path'), args.key, args.path, args.notes)
     elif args.command == "delete":
         delete_main(getattr(args, 'manifest-path'), args.key, args.delete_from_datastore)
-    elif args.command == "add_subdirectory":
+    elif args.command == "add-multiple":
         add_subdirectory_main(
             manifest_fname=getattr(args, 'manifest-path'),
             directory_to_add=getattr(args, 'files-and-directories-to-add'),
-            checkout_prefix=getattr(args, 'checkout-prefix'),
+            # checkout_prefix=getattr(args, 'checkout_prefix'),
             resume=args.resume,
             dry_run=args.dry_run,
         )

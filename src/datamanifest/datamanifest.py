@@ -417,6 +417,7 @@ class DataManifest:
                             ExtraArgs={'VersionId': version_id}
                         )
                         downloaded = True
+                        break
                     except botocore.exceptions.ResponseStreamingError:
                         logger.error(
                             f"Error downloading '{remote_key}' to '{local_cache_path}'"

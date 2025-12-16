@@ -16,6 +16,8 @@ from datamanifest.datamanifest import (
     KeyAlreadyExistsError,
     InvalidKey,
     MissingFileError,
+    MissingLocalConfigError,
+    RemotePath,
     calc_md5sum_from_remote_uri,
     calc_md5sum_from_fname,
     validate_key,
@@ -24,6 +26,7 @@ from datamanifest.datamanifest import (
     environment_variables,
     s3_uri_exists,
     _check_s3_versioning_enabled,
+    MANIFEST_VERSION,
 )
 
 def _find_current_git_hash():
@@ -635,3 +638,211 @@ def test_lazy_load(manifest_fname, cleandir, fast):
     record = manifest.sync_and_get(key2)
     record_2 = manifest.get(key2)
     assert record == record_2
+
+
+# =============================================================================
+# Unit tests for RemotePath URI parsing
+# =============================================================================
+
+def test_remote_path_uri_without_version():
+    """Test RemotePath.from_uri() correctly parses URI without versionId."""
+    rp = RemotePath.from_uri("s3://my-bucket/path/to/file.txt")
+    assert rp.scheme == "s3"
+    assert rp.bucket == "my-bucket"
+    assert rp.path == "path/to/file.txt"
+    assert rp.version_id == ""
+    assert rp.uri == "s3://my-bucket/path/to/file.txt"
+
+
+def test_remote_path_uri_with_version():
+    """Test RemotePath.from_uri() correctly parses URI with versionId."""
+    rp = RemotePath.from_uri("s3://my-bucket/path/to/file.txt?versionId=abc123xyz")
+    assert rp.scheme == "s3"
+    assert rp.bucket == "my-bucket"
+    assert rp.path == "path/to/file.txt"
+    assert rp.version_id == "abc123xyz"
+    assert "versionId=abc123xyz" in rp.uri
+
+
+def test_remote_path_uri_property():
+    """Test RemotePath.uri property includes/excludes versionId correctly."""
+    # Without version_id
+    rp1 = RemotePath("s3", "bucket", "key")
+    assert rp1.uri == "s3://bucket/key"
+    assert "versionId" not in rp1.uri
+    
+    # With version_id
+    rp2 = RemotePath("s3", "bucket", "key", "v123")
+    assert "versionId=v123" in rp2.uri
+
+
+# =============================================================================
+# Unit tests for version validation
+# =============================================================================
+
+def test_manifest_missing_version_in_header(cleandir):
+    """Test that reading a manifest without MANIFEST_VERSION raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a manifest without MANIFEST_VERSION
+    with open(manifest_path, "w") as f:
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write a valid local config
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    with pytest.raises(ValueError, match="MANIFEST_VERSION not found"):
+        DataManifest(manifest_path)
+
+
+def test_manifest_wrong_version_in_header(cleandir):
+    """Test that reading a manifest with wrong MANIFEST_VERSION raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a manifest with wrong version
+    with open(manifest_path, "w") as f:
+        f.write("#MANIFEST_VERSION=999\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write a valid local config
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    with pytest.raises(ValueError, match="MANIFEST_VERSION mismatch"):
+        DataManifest(manifest_path)
+
+
+def test_local_config_missing_version(cleandir):
+    """Test that reading a local config without MANIFEST_VERSION raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a valid manifest
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write local config without version
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    with pytest.raises(ValueError, match="MANIFEST_VERSION not found in local config"):
+        DataManifest(manifest_path)
+
+
+def test_local_config_wrong_version(cleandir):
+    """Test that reading a local config with wrong MANIFEST_VERSION raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a valid manifest
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write local config with wrong version
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write("MANIFEST_VERSION=999\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    with pytest.raises(ValueError, match="MANIFEST_VERSION mismatch in local config"):
+        DataManifest(manifest_path)
+
+
+def test_version_mismatch_between_manifest_and_local_config(cleandir):
+    """Test that mismatched versions between manifest and local config raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write manifest with version 2
+    with open(manifest_path, "w") as f:
+        f.write("#MANIFEST_VERSION=2\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write local config with version 3
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write("MANIFEST_VERSION=3\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    # This should fail on local config validation (version 3 != expected)
+    with pytest.raises(ValueError, match="MANIFEST_VERSION mismatch"):
+        DataManifest(manifest_path)
+
+
+# =============================================================================
+# Unit tests for malformed config files
+# =============================================================================
+
+def test_malformed_local_config_missing_equals(cleandir):
+    """Test that a malformed local config line without '=' gives clear error."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a valid manifest
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write malformed local config (missing =)
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write("THIS_LINE_HAS_NO_EQUALS\n")
+    
+    with pytest.raises(ValueError, match="Malformed config line"):
+        DataManifest(manifest_path)
+
+
+def test_local_config_with_equals_in_value(cleandir):
+    """Test that local config values containing '=' are parsed correctly."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a valid manifest
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+    
+    # Write local config with = in value (should work)
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+        f.write("EXTRA_KEY=value=with=equals\n")
+    
+    # Should not raise - the = in the value should be handled
+    dm = DataManifest(manifest_path)
+    dm.close()
+
+
+# =============================================================================
+# Unit tests for empty version ID validation
+# =============================================================================
+
+def test_empty_version_id_in_manifest(cleandir):
+    """Test that reading a manifest with empty s3_version_id raises ValueError."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write manifest with empty version ID
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+        f.write("myfile.txt\t\tabc123\t100\t\n")  # empty version ID
+    
+    # Write valid local config
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+    
+    with pytest.raises(ValueError, match="s3_version_id is required and cannot be empty"):
+        DataManifest(manifest_path)

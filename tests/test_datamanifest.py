@@ -23,6 +23,7 @@ from datamanifest.datamanifest import (
     random_string,
     environment_variables,
     s3_uri_exists,
+    _check_s3_versioning_enabled,
 )
 
 def _find_current_git_hash():
@@ -59,9 +60,37 @@ def _find_current_git_branch():
     return rv
 
 
-S3_TEST_BUCKET = "ravel-biotechnology-test"
+S3_TEST_BUCKET = "nboley-test-data-manifest"
+S3_TEST_BASE_PATH = ""
 GIT_HASH = _find_current_git_hash()
 GIT_BRANCH = _find_current_git_branch()
+
+
+@pytest.fixture(scope="session")
+def check_s3_bucket_versioning():
+    """Check that the test S3 bucket exists and has versioning enabled.
+    
+    This fixture runs once per test session and fails all tests if:
+    - The bucket doesn't have versioning enabled
+    - We can't check versioning (e.g., no permissions)
+    """
+    try:
+        versioning_enabled = _check_s3_versioning_enabled(S3_TEST_BUCKET)
+        if not versioning_enabled:
+            pytest.fail(
+                f"S3 bucket '{S3_TEST_BUCKET}' does not have versioning enabled. "
+                f"Please enable versioning on the bucket before running tests."
+            )
+    except RuntimeError as e:
+        pytest.fail(
+            f"Cannot verify S3 bucket versioning for '{S3_TEST_BUCKET}': {e}. "
+            f"Please ensure the bucket has versioning enabled and you have the necessary permissions."
+        )
+    except Exception as e:
+        pytest.fail(
+            f"Error checking S3 bucket versioning for '{S3_TEST_BUCKET}': {e}. "
+            f"Please ensure the bucket exists and you have the necessary permissions."
+        )
 
 
 @pytest.fixture()
@@ -105,7 +134,7 @@ def s3_uri_exists(remote_path):
 
 
 @pytest.fixture()
-def manifest_fname(cleandir):
+def manifest_fname(cleandir, check_s3_bucket_versioning):
     """Instantiate a data manifest with files."""
     # make a copy of the current environment to restore
     print(f"Created temporary directory: {cleandir}")
@@ -125,7 +154,10 @@ def manifest_fname(cleandir):
     # or docker mounts.
     os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
 
-    remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    if S3_TEST_BASE_PATH:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{S3_TEST_BASE_PATH}/{GIT_HASH}-{random_string(16)}"
+    else:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
     manifest = DataManifestWriter.new(
         manifest_fname,
@@ -159,7 +191,7 @@ def manifest_fname(cleandir):
     bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()
 
 
-def test_new_dm_on_class_init(cleandir):
+def test_new_dm_on_class_init(cleandir, check_s3_bucket_versioning):
     new_dm_path = f"{cleandir}/test_dm.data_manifest.tsv"
     assert not os.path.exists(
         new_dm_path
@@ -171,7 +203,10 @@ def test_new_dm_on_class_init(cleandir):
     # or docker mounts.
     os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
 
-    remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    if S3_TEST_BASE_PATH:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{S3_TEST_BASE_PATH}/{GIT_HASH}-{random_string(16)}"
+    else:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
 
     with DataManifestWriter.new(
         new_dm_path,
@@ -389,7 +424,7 @@ def test_sync(manifest_fname, cleandir2):
     _verify_manifest(manifest)
 
 
-def test_multiple_manifests_sharing_data(manifest_fname, cleandir2):
+def test_multiple_manifests_sharing_data(manifest_fname, cleandir2, check_s3_bucket_versioning):
     # create the first manifest, and verify that it works
     with DataManifest(manifest_fname) as manifest:
         manifest.sync()

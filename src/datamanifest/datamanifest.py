@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from .config import (
     DEFAULT_FOLDER_PERMISSIONS,
     DEFAULT_FILE_PERMISSIONS,
+    MANIFEST_VERSION,
 )
 
 
@@ -56,12 +57,12 @@ def s3_uri_exists(s3_uri: str) -> bool:
     """
     Check if an s3 uri exists.  A bucket does not count as an s3 uri.
     """
-    bucket, key = split_bucket_key(s3_uri)
-    if key == "":
+    remote_path = RemotePath.from_uri(s3_uri)
+    if remote_path.path == "":
         return False
     s3 = boto3.resource("s3")
     try:
-        s3.Object(bucket, key).load()
+        s3.Object(remote_path.bucket, remote_path.path).load()
     except botocore.exceptions.ClientError as e:
         if e.response["Error"]["Code"] == "404":
             # The object does not exist.
@@ -72,6 +73,39 @@ def s3_uri_exists(s3_uri: str) -> bool:
     else:
         # The object does exist.
         return True
+
+
+def _check_s3_versioning_enabled(bucket_name: str) -> bool:
+    """
+    Check if S3 versioning is enabled on the specified bucket.
+
+    Returns True if versioning is enabled or suspended.
+    Raises RuntimeError if versioning is not enabled or if we cannot check (e.g., no permissions).
+    """
+    s3_client = boto3.client("s3")
+    try:
+        response = s3_client.get_bucket_versioning(Bucket=bucket_name)
+        status = response.get("Status", "")
+        if status in ["Enabled", "Suspended"]:
+            return True
+        else:
+            raise RuntimeError(
+                f"S3 bucket '{bucket_name}' does not have versioning enabled. "
+                f"Status: '{status if status else 'NotSet'}'. "
+                f"Please enable versioning on the bucket before creating a data manifest. "
+                f"See: https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html"
+            )
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code == "AccessDenied":
+            raise RuntimeError(
+                f"Cannot check versioning status for S3 bucket '{bucket_name}': Access Denied. "
+                f"Please ensure you have 's3:GetBucketVersioning' permission, or manually verify "
+                f"that versioning is enabled on the bucket before creating a data manifest."
+            ) from e
+        else:
+            # For other errors (bucket doesn't exist, etc.), let the original error propagate
+            raise
 
 class MissingLocalConfigError(Exception):
     pass
@@ -458,6 +492,16 @@ class DataManifest:
                         continue
                     key, val = line.strip().split("=")
                     config[key.strip()] = val.strip()
+            # validate version
+            if "MANIFEST_VERSION" not in config:
+                raise ValueError(
+                    f"MANIFEST_VERSION not found in local config file '{cls.local_config_path(manifest_path)}'"
+                )
+            if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
+                raise ValueError(
+                    f"MANIFEST_VERSION mismatch in local config file '{cls.local_config_path(manifest_path)}': "
+                    f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
+                )
             return config
         except:
             raise MissingLocalConfigError(f"Could not find a local config file at '{cls.local_config_path(manifest_path)}'\nHint: You probably need to run checkout.")
@@ -476,6 +520,17 @@ class DataManifest:
                 # assume that we're to the header now
                 header = line.strip("\n").split("\t")
                 break
+
+        # validate version
+        if "MANIFEST_VERSION" not in config:
+            raise ValueError(
+                "MANIFEST_VERSION not found in data manifest header"
+            )
+        if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
+            raise ValueError(
+                f"MANIFEST_VERSION mismatch in data manifest: "
+                f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
+            )
 
         fp.seek(0)
         return config, header, line_i
@@ -554,6 +609,13 @@ class DataManifest:
 
         # the local config file should be written by a call to checkout
         local_config = self._read_local_config(manifest_fname)
+        # validate that manifest and local config versions match
+        if manifest_config["MANIFEST_VERSION"] != local_config["MANIFEST_VERSION"]:
+            raise ValueError(
+                f"MANIFEST_VERSION mismatch between manifest file '{manifest_fname}' "
+                f"('{manifest_config['MANIFEST_VERSION']}') and local config file "
+                f"('{local_config['MANIFEST_VERSION']}')"
+            )
         try:
             self.checkout_prefix = local_config['CHECKOUT_PREFIX']
         except KeyError:
@@ -640,6 +702,7 @@ class DataManifest:
                 cls._write_config(
                     ofp,
                     {
+                        'MANIFEST_VERSION': MANIFEST_VERSION,
                         'CHECKOUT_PREFIX': checkout_prefix,
                         'LOCAL_CACHE_PREFIX': local_cache_prefix,
                     },
@@ -775,6 +838,12 @@ class DataManifestWriter(DataManifest):
                 f"A data manifest already exists at {manifest_fname}."
             )
 
+        # parse the remote datastore URI to extract bucket name
+        remote_path = RemotePath.from_uri(remote_datastore_uri)
+        # check that S3 versioning is enabled on the bucket
+        # This will raise RuntimeError if versioning is not enabled or if we cannot check
+        _check_s3_versioning_enabled(remote_path.bucket)
+
         # make any sub-directories needed to create the manifest
         basedir = os.path.dirname(manifest_fname)
         if basedir != '' and not os.path.exists(basedir):
@@ -789,6 +858,7 @@ class DataManifestWriter(DataManifest):
             cls._write_config(
                 ofp,
                 {
+                    'MANIFEST_VERSION': MANIFEST_VERSION,
                     'REMOTE_DATA_MIRROR_URI': remote_datastore_uri,
                     'LOCAL_CACHE_PATH_SUFFIX': local_cache_path_suffix,
                 },
@@ -864,6 +934,7 @@ class DataManifestWriter(DataManifest):
         self._write_config(
             ofstream,
             {
+                'MANIFEST_VERSION': MANIFEST_VERSION,
                 'REMOTE_DATA_MIRROR_URI': self.remote_datastore_uri.uri,
                 'LOCAL_CACHE_PATH_SUFFIX': self.local_cache_path_suffix,
             },

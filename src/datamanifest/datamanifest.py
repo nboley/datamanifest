@@ -172,19 +172,20 @@ def calc_md5sum_from_fp(fp):
     return m.hexdigest()
 
 
-def calc_md5sum_from_remote_uri(remote_path, version_id):
+def calc_md5sum_from_remote_uri(remote_path):
     """Calculate MD5 checksum of a remote S3 object.
     
     Args:
-        remote_path: RemotePath object with bucket and path
-        version_id: S3 version ID to download a specific version
+        remote_path: RemotePath object with bucket, path, and version_id
     """
     assert isinstance(remote_path, RemotePath)
+    if not remote_path.version_id:
+        raise ValueError("RemotePath must have a version_id to calculate MD5 from remote")
     s3 = boto3.resource("s3")
     bucket = s3.Bucket(remote_path.bucket)
     remote_object = bucket.Object(remote_path.path)
     with tempfile.NamedTemporaryFile("wb+") as fp:
-        remote_object.download_fileobj(fp, ExtraArgs={'VersionId': version_id})
+        remote_object.download_fileobj(fp, ExtraArgs={'VersionId': remote_path.version_id})
         m = hashlib.md5()
         fp.seek(0)
         m.update(fp.read())
@@ -222,14 +223,26 @@ class RemotePath:
     scheme: str
     bucket: str
     path: str
+    version_id: str = ""
 
     @classmethod
     def from_uri(cls, uri):
         parsed_uri = urlparse(uri)
         assert parsed_uri.params == ""
-        assert parsed_uri.query == ""
         assert parsed_uri.fragment == ""
-        return cls(parsed_uri.scheme, parsed_uri.netloc, parsed_uri.path.lstrip("/"))
+        # Parse version_id from query string if present
+        version_id = ""
+        if parsed_uri.query:
+            from urllib.parse import parse_qs
+            query_params = parse_qs(parsed_uri.query)
+            if "versionId" in query_params:
+                version_id = query_params["versionId"][0]
+        return cls(
+            parsed_uri.scheme,
+            parsed_uri.netloc,
+            parsed_uri.path.lstrip("/"),
+            version_id
+        )
 
     def __post_init__(self):
         if self.scheme != "s3":
@@ -240,24 +253,25 @@ class RemotePath:
 
     @property
     def uri(self):
-        return f"{self.scheme}://{self.bucket}/{self.path}"
+        base = f"{self.scheme}://{self.bucket}/{self.path}"
+        if self.version_id:
+            return f"{base}?versionId={self.version_id}"
+        return base
 
 
 @dataclasses.dataclass
 class DataManifestRecord:
     key: str
-    s3_version_id: str
     md5sum: str
     size: int
     notes: str
     path: str
     remote_uri: RemotePath
 
-    def __post_init__(self):
-        """Validate that s3_version_id is not empty (for records read from disk)."""
-        # Note: We allow empty s3_version_id during initial record creation (before upload),
-        # but validate it when reading from TSV or before operations that require it.
-        pass
+    @property
+    def s3_version_id(self) -> str:
+        """Get the S3 version ID from the remote URI."""
+        return self.remote_uri.version_id
 
     @staticmethod
     def header() -> List[str]:
@@ -275,13 +289,12 @@ class DataManifest:
 
         return DataManifestRecord(
             key,
-            s3_version_id,
             md5sum,
             fsize,
             notes=notes,
             path=self._build_checkout_path(self.checkout_prefix, key),
             remote_uri=self._build_remote_datastore_uri(
-                self.remote_datastore_uri, key
+                self.remote_datastore_uri, key, s3_version_id
             ),
         )
 
@@ -456,7 +469,7 @@ class DataManifest:
         )
 
     @classmethod
-    def _build_remote_datastore_uri(cls, remote_datastore_uri, key):
+    def _build_remote_datastore_uri(cls, remote_datastore_uri, key, version_id=""):
         """Build the remote S3 URI for a key.
         
         Note: S3 versioning is used instead of MD5 in the path.
@@ -467,6 +480,7 @@ class DataManifest:
             os.path.normpath(
                 os.path.join(remote_datastore_uri.path, key)
             ),
+            version_id,
         )
 
     def get_local_cache_path(self, key):
@@ -594,13 +608,12 @@ class DataManifest:
 
             record = DataManifestRecord(
                 key,
-                s3_version_id,
                 md5sum,
                 int(size),
                 notes,
                 path=self._build_checkout_path(self.checkout_prefix, key),
                 remote_uri=self._build_remote_datastore_uri(
-                    self.remote_datastore_uri, key
+                    self.remote_datastore_uri, key, s3_version_id
                 ),
             )
             if record.key in data:
@@ -996,10 +1009,16 @@ class DataManifestWriter(DataManifest):
         )
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
-            # strip off the last two values (path and remote uri)
-            ofstream.write(
-                "\t".join(str(x) for x in dataclasses.astuple(record)[:-2]) + "\n"
-            )
+            # Write record in TSV format: key, s3_version_id, md5sum, size, notes
+            # Note: s3_version_id is a property derived from remote_uri.version_id
+            row = [
+                record.key,
+                record.s3_version_id,
+                record.md5sum,
+                str(record.size),
+                record.notes,
+            ]
+            ofstream.write("\t".join(row) + "\n")
 
     def _save_to_disk(self):
         """Save the current data to disk."""
@@ -1063,12 +1082,14 @@ class DataManifestWriter(DataManifest):
         with open(fname_to_add) as _:  # noqa
             pass
 
-        # add the data record into the object (s3_version_id will be set after upload)
+        # add the data record into the object (version_id will be set after upload)
         self._data[key] = self._build_new_data_manifest_record(key, fname_to_add, notes)
         # Add the file to the remote datastore and get the version ID
         version_id = self._upload_to_s3(key, fname_to_add)
-        # Update the record with the version ID
-        self._data[key] = dataclasses.replace(self._data[key], s3_version_id=version_id)
+        # Update the record's remote_uri with the version ID
+        old_remote_uri = self._data[key].remote_uri
+        new_remote_uri = dataclasses.replace(old_remote_uri, version_id=version_id)
+        self._data[key] = dataclasses.replace(self._data[key], remote_uri=new_remote_uri)
         # Copy the file to the local cache
         self._copy_local_file_to_local_cache(key, fname_to_add)
         if is_update:

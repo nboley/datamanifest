@@ -523,7 +523,14 @@ class DataManifest:
                     # skip empty lines
                     if line.strip() == "":
                         continue
-                    key, val = line.strip().split("=")
+                    # use maxsplit=1 to handle values containing "="
+                    parts = line.strip().split("=", maxsplit=1)
+                    if len(parts) != 2:
+                        raise ValueError(
+                            f"Malformed config line {line_i + 1} in '{cls.local_config_path(manifest_path)}': "
+                            f"expected 'KEY=VALUE' format, got '{line.strip()}'"
+                        )
+                    key, val = parts
                     config[key.strip()] = val.strip()
         except FileNotFoundError:
             raise MissingLocalConfigError(f"Could not find a local config file at '{cls.local_config_path(manifest_path)}'\nHint: You probably need to run checkout.")

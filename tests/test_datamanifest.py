@@ -405,11 +405,74 @@ def test_update_record(manifest_fname):
         assert list(manifest)[0] == updated_record
 
 
+def test_update_preserves_version_history(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """Test that after updating a file, both versions are accessible via their version IDs.
+    
+    This test:
+    1. Creates a manifest and adds a file (version 1)
+    2. Saves a copy of the manifest state (version 1 record)
+    3. Updates the file at the same key (version 2)
+    4. Verifies that version 1's s3_version_id still retrieves the original content
+    5. Verifies that version 2's s3_version_id retrieves the updated content
+    6. Verifies MD5 checksums match for both versions
+    """
+    import copy
+    
+    # Add the first version of the file
+    payload_v1 = "version 1 content - " + random_string(16)
+    test_path = os.path.join(cleandir2, "test_file.txt")
+    with open(test_path, "w") as fp:
+        fp.write(payload_v1)
+    
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add("versioned_file.txt", test_path)
+        record_v1 = manifest.get("versioned_file.txt", validate=False)
+        # Save version 1 info
+        v1_md5sum = record_v1.md5sum
+        v1_version_id = record_v1.s3_version_id
+        v1_remote_uri = copy.deepcopy(record_v1.remote_uri)
+    
+    # Verify version 1 is accessible and correct
+    remote_md5_v1 = calc_md5sum_from_remote_uri(v1_remote_uri, v1_version_id)
+    assert remote_md5_v1 == v1_md5sum, f"Version 1 MD5 mismatch: {remote_md5_v1} != {v1_md5sum}"
+    
+    # Update the file with new content (version 2)
+    payload_v2 = "version 2 content - " + random_string(16)
+    with open(test_path, "w") as fp:
+        fp.write(payload_v2)
+    
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.update("versioned_file.txt", test_path)
+        record_v2 = manifest.get("versioned_file.txt", validate=False)
+        # Save version 2 info
+        v2_md5sum = record_v2.md5sum
+        v2_version_id = record_v2.s3_version_id
+        v2_remote_uri = copy.deepcopy(record_v2.remote_uri)
+    
+    # Verify the version IDs are different
+    assert v1_version_id != v2_version_id, "Version IDs should be different after update"
+    
+    # Verify the MD5s are different (since content changed)
+    assert v1_md5sum != v2_md5sum, "MD5 checksums should be different after content change"
+    
+    # Verify version 1 is still accessible with correct content
+    remote_md5_v1_after = calc_md5sum_from_remote_uri(v1_remote_uri, v1_version_id)
+    assert remote_md5_v1_after == v1_md5sum, f"Version 1 MD5 mismatch after update: {remote_md5_v1_after} != {v1_md5sum}"
+    
+    # Verify version 2 is accessible with correct content
+    remote_md5_v2 = calc_md5sum_from_remote_uri(v2_remote_uri, v2_version_id)
+    assert remote_md5_v2 == v2_md5sum, f"Version 2 MD5 mismatch: {remote_md5_v2} != {v2_md5sum}"
+    
+    # Verify remote paths are the same (only version ID differs)
+    assert v1_remote_uri.bucket == v2_remote_uri.bucket
+    assert v1_remote_uri.path == v2_remote_uri.path
+
+
 def _verify_manifest(manifest):
     # ensure that every file in the manifest exists, and is the same as the remote file
     # this is doing the same thing as validate, but manually
     for record in manifest:
-        remote_md5sum = calc_md5sum_from_remote_uri(record.remote_uri)
+        remote_md5sum = calc_md5sum_from_remote_uri(record.remote_uri, record.s3_version_id)
         local_md5sum = calc_md5sum_from_fname(record.path)
         assert record.md5sum == remote_md5sum
         assert record.md5sum == local_md5sum

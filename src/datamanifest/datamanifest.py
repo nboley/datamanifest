@@ -172,13 +172,19 @@ def calc_md5sum_from_fp(fp):
     return m.hexdigest()
 
 
-def calc_md5sum_from_remote_uri(remote_path):
+def calc_md5sum_from_remote_uri(remote_path, version_id):
+    """Calculate MD5 checksum of a remote S3 object.
+    
+    Args:
+        remote_path: RemotePath object with bucket and path
+        version_id: S3 version ID to download a specific version
+    """
     assert isinstance(remote_path, RemotePath)
     s3 = boto3.resource("s3")
     bucket = s3.Bucket(remote_path.bucket)
     remote_object = bucket.Object(remote_path.path)
     with tempfile.NamedTemporaryFile("wb+") as fp:
-        remote_object.download_fileobj(fp)
+        remote_object.download_fileobj(fp, ExtraArgs={'VersionId': version_id})
         m = hashlib.md5()
         fp.seek(0)
         m.update(fp.read())

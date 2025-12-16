@@ -1,6 +1,15 @@
 # Data Manifest
 
-DataManifest is a lightweight tool and python library for storing and versioning collections of bioinformatics data. The design philosphy is that everything should be usable as a file tree, while allowing for syncs to s3, fast cehckouts, and data safety through file-system level locks and md5sum verifications.
+DataManifest is a lightweight tool and python library for storing and versioning collections of bioinformatics data. The design philosophy is that everything should be usable as a file tree, while allowing for syncs to S3, fast checkouts, and data safety through file-system level locks and md5sum verifications.
+
+## Versioning
+
+DataManifest uses **S3 native versioning** to track file versions. This means:
+- The S3 bucket **must have versioning enabled** before creating a manifest
+- Remote files are stored with their original names (no MD5 prefix)
+- Each file upload returns a unique S3 version ID that is stored in the manifest
+- Previous versions remain accessible via their version IDs
+- Local cache files use MD5 prefixes for deduplication across versions
 
 # Quick Start
 
@@ -20,15 +29,19 @@ run: `python setup.py install`
 
 ### Create a remote datastore
 
-First, we'll create a new s3 bucket:
+First, we'll create a new S3 bucket with versioning enabled:
 ```
-aws s3 mb s3://test-data-manifest-2-2024/
+aws s3 mb s3://TEST-DATA-MANIFEST/
+aws s3api put-bucket-versioning --bucket TEST-DATA-MANIFEST --versioning-configuration Status=Enabled
 ```
 
+Verify versioning is enabled:
 ```
-aws s3 ls s3://test-data-manifest-2-2024/
+aws s3api get-bucket-versioning --bucket TEST-DATA-MANIFEST
+{
+    "Status": "Enabled"
+}
 ```
-Shows that the bucket is empty.
 
 ### Run tests to verify the installation
 ```pytest --verbose .```
@@ -59,15 +72,15 @@ total 708
 
 Running `dm --help` shows all of the sub-commands and options. 
 Running `dm sub_cmd --help` shows the options for that particular subcommand. 
-Global options like `--vebrose` and `--quiet` need to be passed after `dm` but before the sub-command. e.g. `dm --verbose create` not `dm create --verbose`.
+Global options like `--verbose` and `--quiet` need to be passed after `dm` but before the sub-command. e.g. `dm --verbose create` not `dm create --verbose`.
 
 
 ### Create a new data manifest
 
-Create a new data manifest. Note that we need to pass LOCAL_DATA_MIRROR_PATH and REMOTE_DATA_MIRROR_URI as environment variables. Usually these would be set in your `.bashrc` or similar.
+Create a new data manifest:
 ```
-> dm create test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://test-data-manifest-2-2024/test1  ./test_data/*
-Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
+> dm create test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://TEST-DATA-MANIFEST/test1  ./test_data/*
+Add files: 100%|████████████████████████████████████████████████████████████████| 4/4 [00:01<00:00,  3.95it/s]
 ```
 
 `dm create` creates two metadata files:
@@ -77,13 +90,17 @@ Add files: 100%|█████████████████████�
 We can look at the data manifest, the local config file, and the checkout directory:
 ```
 > cat test.data_manifest.tsv
-key     md5sum  size    notes
-data/small.chr6.bam.bai 69ef0af03399b9cfe7037aaaa5cdff7b        97152
-data/small.chr6.bam     100d7d094d19c7eaa2b93a4bb67ecda7        198736
-genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz   f02b28cef526d5ee3d657f010bfbc2bb        283499
-README  ca1ea02c10b7c37f425b9b7dd86d5e11        9
+#MANIFEST_VERSION=2
+#REMOTE_DATA_MIRROR_URI=s3://TEST-DATA-MANIFEST/test1
+#LOCAL_CACHE_PATH_SUFFIX=./DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/
+key	s3_version_id	md5sum	size	notes
+data/small.chr6.bam.bai	abc123def456...	69ef0af03399b9cfe7037aaaa5cdff7b	97152
+data/small.chr6.bam	ghi789jkl012...	100d7d094d19c7eaa2b93a4bb67ecda7	198736
+genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz	mno345pqr678...	f02b28cef526d5ee3d657f010bfbc2bb	283499
+README	stu901vwx234...	ca1ea02c10b7c37f425b9b7dd86d5e11	9
 
 > cat test.data_manifest.tsv.local_config 
+MANIFEST_VERSION=2
 CHECKOUT_PREFIX=/scratch/nboley/dm_tests/test_checkout
 LOCAL_CACHE_PREFIX=/tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq
 
@@ -97,20 +114,14 @@ test_checkout/data/small.chr6.bam.bai
 test_checkout/data/small.chr6.bam
 ```
 
-Note that the files under `test_checkout` are symbolic links to LOCAL_DATA_MIRROR_PATH to faciliate fast checkouts. 
+Note that the files under `test_checkout` are symbolic links to the local cache to facilitate fast checkouts. 
 ```
 > stat test_checkout/README 
-  File: test_checkout/README -> /tmp/test_dm/ca1ea02c10b7c37f425b9b7dd86d5e11-README
+  File: test_checkout/README -> /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/ca1ea02c10b7c37f425b9b7dd86d5e11-README
   Size: 52              Blocks: 0          IO Block: 4096   symbolic link
-Device: 900h/2304d      Inode: 488968007   Links: 1
-Access: (0777/lrwxrwxrwx)  Uid: ( 1001/  nboley)   Gid: ( 5018/developer)
-Access: 2024-02-29 12:58:04.886945490 -0800
-Modify: 2024-02-29 12:56:51.020217023 -0800
-Change: 2024-02-29 12:56:51.020217023 -0800
- Birth: -
 ```
 
-Files containing the data can be found under the local_cache_prefix
+Files containing the data can be found under the local_cache_prefix. Note that **local cache files have MD5 prefixes** for deduplication:
 ```
 > find /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq
 /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq
@@ -122,23 +133,26 @@ Files containing the data can be found under the local_cache_prefix
 /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/ca1ea02c10b7c37f425b9b7dd86d5e11-README
 ```
 
-The files have also been mirrored in s3:
+The files have also been mirrored in S3. Note that **remote files use plain paths** (S3 versioning handles versions):
 ```
-> aws s3 ls --recursive test-data-manifest-2-2024
-2024-02-29 12:59:53          9 test1/ca1ea02c10b7c37f425b9b7dd86d5e11-README
-2024-02-29 12:59:52     198736 test1/data/100d7d094d19c7eaa2b93a4bb67ecda7-small.chr6.bam
-2024-02-29 12:59:51      97152 test1/data/69ef0af03399b9cfe7037aaaa5cdff7b-small.chr6.bam.bai
-2024-02-29 12:59:52     283499 test1/genome/f02b28cef526d5ee3d657f010bfbc2bb-GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
+> aws s3 ls --recursive TEST-DATA-MANIFEST
+2024-02-29 12:59:53          9 test1/README
+2024-02-29 12:59:52     198736 test1/data/small.chr6.bam
+2024-02-29 12:59:51      97152 test1/data/small.chr6.bam.bai
+2024-02-29 12:59:52     283499 test1/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
 ```
 
-Note that the filenames in the local cache and remote mirror have been pre-pended with their md5 checksums to allow for file versioning.
+To see all versions of a file, use `aws s3api list-object-versions`:
+```
+> aws s3api list-object-versions --bucket TEST-DATA-MANIFEST --prefix test1/README
+```
 
 
 ### Checkout and sync an existing data manifest
 
 The data manifest stores all of the information needed to re-create the data in a new environment. 
 
-To checkout an existing datya manifest in a new environment use the `dm sync` command. In our case, we will delete the associated local_config file to simnlate a new environment.
+To checkout an existing data manifest in a new environment use the `dm checkout` command. In our case, we will delete the associated local_config file to simulate a new environment.
 
 ```
 rm test.data_manifest.tsv.local_config
@@ -146,12 +160,12 @@ rm test.data_manifest.tsv.local_config
 [__main__ : 2024-03-01 07:54:49,258 dm - parse_args() ] Changing the relative checkout prefix path 'test_checkout_2' to '/scratch/nboley/dm_tests/test_checkout_2'
 ```
 
-`checkout` is a lazy command meaning that it creates the local config file and checkout directory but doesn't sync any files. We can sync by either using the sync command or passing the `sync` option to `dm checkout`. 
+`checkout` is a lazy command meaning that it creates the local config file and checkout directory but doesn't sync any files. We can sync by either using the sync command or passing the `--sync` option to `dm checkout`. 
 
 To sync the newly checkout directory run:
 ```
 > dm sync test.data_manifest.tsv
-100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 790.71it/s]
+100%|███████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 790.71it/s]
 ```
 
 Verifying that the links were all created and match test_checkout/:
@@ -178,7 +192,7 @@ Note that the files in `test_checkout/` and `test_checkout_2/` point to the same
 
 This means that running a checkout on a system with a shared cache is a very inexpensive operation -- it just requires verifying the md5sums and file sizes.  You can use the `--fast` option to make this even faster by skipping verifying the md5sums on checkout (it will still verify that the file sizes match so this is still pretty safe).
 
-One common use case for a shared cache is using docker containers. A shared physical cache can be mounted in multiple docker containers, and then files can be checked out very quickly without needing to actual download or copy data.
+One common use case for a shared cache is using docker containers. A shared physical cache can be mounted in multiple docker containers, and then files can be checked out very quickly without needing to actually download or copy data.
 
 ### Adding, Updating, and Deleting files
 
@@ -193,7 +207,7 @@ Then we'll add to the data manifest with key test_key:
 ```
 > dm add test.data_manifest.tsv test_key TENAs.txt
 > cat test.data_manifest.tsv | tail -n 1
-test_key        f252b28c22d0bb68caf870df063b6064        10
+test_key	xyz789abc123...	f252b28c22d0bb68caf870df063b6064	10
 ```
 
 We can also update the file:
@@ -201,91 +215,101 @@ We can also update the file:
 > echo 'BBBBBBBBB' > TENAs.txt
 > dm update test.data_manifest.tsv test_key TENAs.txt
 > cat test.data_manifest.tsv | tail -n 1
-test_key        961310d0926542e45d7190a22d68b48c        10
+test_key	def456ghi789...	961310d0926542e45d7190a22d68b48c	10
 ```
 
-Note the change in the md5sum. Both files still exist in the remote uri and local cache:
+Note the change in both the s3_version_id and md5sum. Both versions still exist in S3 (accessible via their version IDs) and in the local cache:
 ```
 > find /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq | grep test_key
 /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/961310d0926542e45d7190a22d68b48c-test_key
 /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/f252b28c22d0bb68caf870df063b6064-test_key
-> aws s3 ls --recursive test-data-manifest-2-2024 | grep test_key
-2024-03-01 08:11:28         10 test1/961310d0926542e45d7190a22d68b48c-test_key
-2024-02-29 23:41:54         10 test1/f252b28c22d0bb68caf870df063b6064-test_key
+
+> aws s3api list-object-versions --bucket TEST-DATA-MANIFEST --prefix test1/test_key
+{
+    "Versions": [
+        {
+            "VersionId": "def456ghi789...",
+            "Key": "test1/test_key",
+            ...
+        },
+        {
+            "VersionId": "xyz789abc123...",
+            "Key": "test1/test_key",
+            ...
+        }
+    ]
+}
 ```
 
-Finally, we can delete files:
+Finally, we can delete files from the manifest:
 ```
 > dm delete test.data_manifest.tsv test_key
 > cat test.data_manifest.tsv
-#REMOTE_DATA_MIRROR_URI=s3://test-data-manifest-2-2024/test1
+#MANIFEST_VERSION=2
+#REMOTE_DATA_MIRROR_URI=s3://TEST-DATA-MANIFEST/test1
 #LOCAL_CACHE_PATH_SUFFIX=./DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/
-key     md5sum  size    notes
-data/small.chr6.bam.bai 69ef0af03399b9cfe7037aaaa5cdff7b        97152
-data/small.chr6.bam     100d7d094d19c7eaa2b93a4bb67ecda7        198736
-genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz   f02b28cef526d5ee3d657f010bfbc2bb        283499
-README  ca1ea02c10b7c37f425b9b7dd86d5e11        9
+key	s3_version_id	md5sum	size	notes
+data/small.chr6.bam.bai	abc123def456...	69ef0af03399b9cfe7037aaaa5cdff7b	97152
+data/small.chr6.bam	ghi789jkl012...	100d7d094d19c7eaa2b93a4bb67ecda7	198736
+genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz	mno345pqr678...	f02b28cef526d5ee3d657f010bfbc2bb	283499
+README	stu901vwx234...	ca1ea02c10b7c37f425b9b7dd86d5e11	9
 ```
 
-The files still exist in the remote data store and local cache:
-```
-> find /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq | grep test_key
-/tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/961310d0926542e45d7190a22d68b48c-test_key
-/tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/f252b28c22d0bb68caf870df063b6064-test_key
-> aws s3 ls --recursive test-data-manifest-2-2024 | grep test_key
-2024-03-01 08:11:28         10 test1/961310d0926542e45d7190a22d68b48c-test_key
-2024-02-29 23:41:54         10 test1/f252b28c22d0bb68caf870df063b6064-test_key
-```
+Note that `test_key` is no longer in the manifest. By default, `dm delete` only removes the file from the manifest. The file still exists in S3 (both versions) and in the local cache. This allows you to restore the file later if needed.
 
-We can use `--delete-from-datastore` switch to permanently delete objects:
+To permanently delete the specific version from S3, use `--delete-from-datastore`:
 ```
 > dm delete test.data_manifest.tsv test_key --delete-from-datastore
 WARNING: you have chosen to delete 'test_key' from the datastore.
 This action CANNOT BE UNDONE!
 Type 'I am sure' to continue: I am sure
-
-> find /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq | grep test_key
-/tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq/f252b28c22d0bb68caf870df063b6064-test_key
-> aws s3 ls --recursive test-data-manifest-2-2024 | grep test_key
-2024-02-29 23:41:54         10 test1/f252b28c22d0bb68caf870df063b6064-test_key
 ```
 
-Now only the original file associated with the key exists.
+This permanently deletes the specific version from S3 (other versions of the same key remain accessible).
 
 # Gotchas and Caveats
+
+### S3 Bucket Versioning Required
+
+DataManifest requires S3 bucket versioning to be enabled. If you try to create a manifest pointing to a bucket without versioning, you'll get an error:
+```
+RuntimeError: S3 bucket 'my-bucket' does not have versioning enabled. 
+Please enable versioning on the bucket before creating a data manifest.
+```
+
+Enable versioning with:
+```
+aws s3api put-bucket-versioning --bucket my-bucket --versioning-configuration Status=Enabled
+```
 
 ### A couple things to note about create:
 
 #### Use `--verbose` with the `--dry-run` option to check what keys and files will be processed. e.g.:
 ```
-> LOCAL_DATA_MIRROR_PATH=/tmp/test_dm/ REMOTE_DATA_URI=s3://test-data-manifest-2-2024/test1 dm --verbose create ./test.data_manifest.tsv ./test_checkout/ ./test_data/ --dry-run
-[__main__ : 2024-02-29 12:48:22,915 dm - _find_all_files_and_directories() ] Adding 'test_data' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv
-Add files:   0%|                                                                                                                                                                                                                                                                                                                                  | 0/4 [00:00<?, ?it/s][__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/README' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/README
-[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz
-[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam.bai' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam.bai
-[__main__ : 2024-02-29 12:48:22,916 dm - _add_subdirectory() ] Adding 'test_data/data/small.chr6.bam' to ./tmp.LMpMSiDiK2FhxsKc.test.data_manifest.tsv for /scratch/nboley/dm_tests/test_data/data/small.chr6.bam
-Add files: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 31126.56it/s]
+> dm --verbose create ./test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://TEST-DATA-MANIFEST/test1 ./test_data/ --dry-run
 ```
-
 
 #### The key is inferred from the passed directory structure.
 
-`dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/*` yields:
+`dm create ./test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://bucket/path ./test_data/*` yields:
 ```
-key     md5sum  size    notes
-data/small.chr6.bam.bai 69ef0af03399b9cfe7037aaaa5cdff7b        97152
-data/small.chr6.bam     100d7d094d19c7eaa2b93a4bb67ecda7        198736
-genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz   f02b28cef526d5ee3d657f010bfbc2bb        283499
-README  ca1ea02c10b7c37f425b9b7dd86d5e11        9
-```
-
-whereas `dm create ./test.data_manifest.tsv ./test_checkout/ ./test_data/` yields:
-```
-key     md5sum  size    notes
-test_data/README        ca1ea02c10b7c37f425b9b7dd86d5e11        9
-test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz f02b28cef526d5ee3d657f010bfbc2bb        283499
-test_data/data/small.chr6.bam.bai       69ef0af03399b9cfe7037aaaa5cdff7b        97152
-test_data/data/small.chr6.bam   100d7d094d19c7eaa2b93a4bb67ecda7        198736
+key	s3_version_id	md5sum	size	notes
+data/small.chr6.bam.bai	...	69ef0af03399b9cfe7037aaaa5cdff7b	97152
+data/small.chr6.bam	...	100d7d094d19c7eaa2b93a4bb67ecda7	198736
+genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz	...	f02b28cef526d5ee3d657f010bfbc2bb	283499
+README	...	ca1ea02c10b7c37f425b9b7dd86d5e11	9
 ```
 
+whereas `dm create ./test.data_manifest.tsv --checkout-prefix ./test_checkout/ --remote-datastore-uri s3://bucket/path ./test_data/` yields:
+```
+key	s3_version_id	md5sum	size	notes
+test_data/README	...	ca1ea02c10b7c37f425b9b7dd86d5e11	9
+test_data/genome/GRCh38.p12.genome.chr6_99110000_99130000.fa.gz	...	f02b28cef526d5ee3d657f010bfbc2bb	283499
+test_data/data/small.chr6.bam.bai	...	69ef0af03399b9cfe7037aaaa5cdff7b	97152
+test_data/data/small.chr6.bam	...	100d7d094d19c7eaa2b93a4bb67ecda7	198736
+```
+
+### Manifest Version
+
+DataManifest includes a `MANIFEST_VERSION` in both the manifest file and local config file. This ensures compatibility and will produce clear error messages if you try to use an incompatible manifest format.
 

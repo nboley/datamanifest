@@ -240,19 +240,26 @@ class RemotePath:
 @dataclasses.dataclass
 class DataManifestRecord:
     key: str
+    s3_version_id: str
     md5sum: str
     size: int
     notes: str
     path: str
     remote_uri: RemotePath
 
+    def __post_init__(self):
+        """Validate that s3_version_id is not empty (for records read from disk)."""
+        # Note: We allow empty s3_version_id during initial record creation (before upload),
+        # but validate it when reading from TSV or before operations that require it.
+        pass
+
     @staticmethod
     def header() -> List[str]:
-        return ["key", "md5sum", "size", "notes", "path", "remote_uri"]
+        return ["key", "s3_version_id", "md5sum", "size", "notes", "path", "remote_uri"]
 
 
 class DataManifest:
-    def _build_new_data_manifest_record(self, key, fname_to_add, notes):
+    def _build_new_data_manifest_record(self, key, fname_to_add, notes, s3_version_id=""):
         # find the file's file size and calculate the checksum
         logger.info(f"Calculating md5sum for '{fname_to_add}'")
         md5sum = calc_md5sum_from_fname(fname_to_add)
@@ -262,12 +269,13 @@ class DataManifest:
 
         return DataManifestRecord(
             key,
+            s3_version_id,
             md5sum,
             fsize,
             notes=notes,
             path=self._build_checkout_path(self.checkout_prefix, key),
             remote_uri=self._build_remote_datastore_uri(
-                self.remote_datastore_uri, key, md5sum
+                self.remote_datastore_uri, key
             ),
         )
 
@@ -371,11 +379,12 @@ class DataManifest:
                     self._data[key], local_cache_path, check_md5sum=not fast
                 )
             else:
-                # if it doesn't then download the file
+                # if it doesn't then download the file (using version ID)
                 s3 = boto3.resource("s3")
                 bucket = s3.Bucket(self.remote_datastore_uri.bucket)
                 remote_key = self._data[key].remote_uri.path
-                logger.info(f"Setting remote key to '{remote_key}'.")
+                version_id = self._data[key].s3_version_id
+                logger.info(f"Downloading '{remote_key}' (version: {version_id})")
                 remote_object = bucket.Object(remote_key)
                 if os.path.exists(local_cache_path):
                     raise RuntimeError(
@@ -384,7 +393,10 @@ class DataManifest:
                 downloaded = False
                 for rr in range(retries):
                     try:
-                        remote_object.download_file(local_cache_path)
+                        remote_object.download_file(
+                            local_cache_path,
+                            ExtraArgs={'VersionId': version_id}
+                        )
                         downloaded = True
                     except botocore.exceptions.ResponseStreamingError:
                         logger.error(
@@ -438,15 +450,16 @@ class DataManifest:
         )
 
     @classmethod
-    def _build_remote_datastore_uri(cls, remote_datastore_uri, key, md5sum):
+    def _build_remote_datastore_uri(cls, remote_datastore_uri, key):
+        """Build the remote S3 URI for a key.
+        
+        Note: S3 versioning is used instead of MD5 in the path.
+        """
         return RemotePath(
             remote_datastore_uri.scheme,
             remote_datastore_uri.bucket,
             os.path.normpath(
-                os.path.join(
-                    remote_datastore_uri.path,
-                    cls._build_datastore_suffix(key, md5sum),
-                )
+                os.path.join(remote_datastore_uri.path, key)
             ),
         )
 
@@ -492,19 +505,22 @@ class DataManifest:
                         continue
                     key, val = line.strip().split("=")
                     config[key.strip()] = val.strip()
-            # validate version
-            if "MANIFEST_VERSION" not in config:
-                raise ValueError(
-                    f"MANIFEST_VERSION not found in local config file '{cls.local_config_path(manifest_path)}'"
-                )
-            if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
-                raise ValueError(
-                    f"MANIFEST_VERSION mismatch in local config file '{cls.local_config_path(manifest_path)}': "
-                    f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
-                )
-            return config
-        except:
+        except FileNotFoundError:
             raise MissingLocalConfigError(f"Could not find a local config file at '{cls.local_config_path(manifest_path)}'\nHint: You probably need to run checkout.")
+        except OSError as e:
+            raise MissingLocalConfigError(f"Could not read local config file at '{cls.local_config_path(manifest_path)}': {e}\nHint: You probably need to run checkout.")
+        
+        # validate version (after successfully reading the file)
+        if "MANIFEST_VERSION" not in config:
+            raise ValueError(
+                f"MANIFEST_VERSION not found in local config file '{cls.local_config_path(manifest_path)}'"
+            )
+        if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
+            raise ValueError(
+                f"MANIFEST_VERSION mismatch in local config file '{cls.local_config_path(manifest_path)}': "
+                f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
+            )
+        return config
 
     @staticmethod
     def _load_header(fp):
@@ -547,19 +563,38 @@ class DataManifest:
                 continue
 
             # parse and store this record to the ordered dict
-            key, md5sum, size, *notes = line.strip("\n").split("\t")
-            notes = notes[0] if notes else ""
+            # Column order: ["key", "s3_version_id", "md5sum", "size", "notes"]
+            parts = line.strip("\n").split("\t")
+            if len(parts) < 4:
+                raise ValueError(
+                    f"Invalid record format in '{self.fname}' at line {line_i + 1}: "
+                    f"expected at least 4 columns (key, s3_version_id, md5sum, size), got {len(parts)}"
+                )
+            key = parts[0]
+            s3_version_id = parts[1]
+            md5sum = parts[2]
+            size = parts[3]
+            notes = parts[4] if len(parts) > 4 else ""
+            
+            # validate s3_version_id is not empty
+            if not s3_version_id or not s3_version_id.strip():
+                raise ValueError(
+                    f"s3_version_id is required and cannot be empty for key '{key}' "
+                    f"in '{self.fname}' at line {line_i + 1}"
+                )
+            
             # make sure the key follows the naming convention
             validate_key(key)
 
             record = DataManifestRecord(
                 key,
+                s3_version_id,
                 md5sum,
                 int(size),
                 notes,
                 path=self._build_checkout_path(self.checkout_prefix, key),
                 remote_uri=self._build_remote_datastore_uri(
-                    self.remote_datastore_uri, key, md5sum
+                    self.remote_datastore_uri, key
                 ),
             )
             if record.key in data:
@@ -899,36 +934,48 @@ class DataManifestWriter(DataManifest):
                 except OSError:
                     break
 
-        # delete from s3
-        s3 = boto3.resource("s3")
-        bucket = s3.Bucket(self._data[key].remote_uri.bucket)
+        # delete from s3 (deletes the specific version)
+        s3_client = boto3.client("s3")
+        bucket_name = self._data[key].remote_uri.bucket
         remote_key = self._data[key].remote_uri.path
-        remote_object = bucket.Object(remote_key)
-        remote_object.delete()
-        remote_object.wait_until_not_exists()
+        version_id = self._data[key].s3_version_id
+        logger.debug(f"Deleting s3://{bucket_name}/{remote_key} (version: {version_id})")
+        s3_client.delete_object(
+            Bucket=bucket_name,
+            Key=remote_key,
+            VersionId=version_id
+        )
 
     def _upload_to_s3(self, key, fname_to_add):
-        s3 = boto3.resource("s3")
-        bucket = s3.Bucket(self._data[key].remote_uri.bucket)
+        """Upload file to S3 and return the version ID.
+        
+        Returns:
+            str: The S3 version ID of the uploaded object.
+            
+        Raises:
+            RuntimeError: If the bucket doesn't have versioning enabled (no version ID returned).
+        """
+        s3_client = boto3.client("s3")
+        bucket_name = self._data[key].remote_uri.bucket
         remote_key = self._data[key].remote_uri.path
-        logger.debug(f"Setting remote key to '{remote_key}'.")
-        remote_object = bucket.Object(remote_key)
-        try:
-            remote_object.load()
-        except botocore.exceptions.ClientError as inst:
-            # if the object can't be found, then create it
-            if inst.response["Error"]["Code"] == "404":
-                remote_object.upload_file(fname_to_add)
-                remote_object.wait_until_exists()
-            # if there was a non-404 error, then re-raise the exception
-            else:
-                raise inst
-        else:
-            # note that remote_key contains the md5 sum of the file, so we know that
-            # it's safe to use the existing version
-            logger.warning(
-                f"'{remote_key}' already exists in s3 -- using existing version."
+        logger.debug(f"Uploading to s3://{bucket_name}/{remote_key}")
+        
+        with open(fname_to_add, 'rb') as f:
+            response = s3_client.put_object(
+                Bucket=bucket_name,
+                Key=remote_key,
+                Body=f
             )
+        
+        version_id = response.get('VersionId')
+        if not version_id:
+            raise RuntimeError(
+                f"S3 bucket '{bucket_name}' did not return a version ID. "
+                f"Ensure versioning is enabled on the bucket."
+            )
+        
+        logger.debug(f"Uploaded '{remote_key}' with version ID '{version_id}'")
+        return version_id
 
     def write_tsv(self, ofstream):
         self._write_config(
@@ -1010,10 +1057,12 @@ class DataManifestWriter(DataManifest):
         with open(fname_to_add) as _:  # noqa
             pass
 
-        # add the data record into the object
+        # add the data record into the object (s3_version_id will be set after upload)
         self._data[key] = self._build_new_data_manifest_record(key, fname_to_add, notes)
-        # Add the file to the remote datastore
-        self._upload_to_s3(key, fname_to_add)
+        # Add the file to the remote datastore and get the version ID
+        version_id = self._upload_to_s3(key, fname_to_add)
+        # Update the record with the version ID
+        self._data[key] = dataclasses.replace(self._data[key], s3_version_id=version_id)
         # Copy the file to the local cache
         self._copy_local_file_to_local_cache(key, fname_to_add)
         if is_update:

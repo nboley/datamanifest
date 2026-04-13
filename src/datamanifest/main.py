@@ -27,8 +27,8 @@ def _find_all_files_and_directories(files_and_directories_to_add, dm_fname):
                 for fname in fnames:
                     # we add 1 to the common prefix length to strip off the '/'
                     key = os.path.normpath(os.path.join(root[len(common_prefix):], fname))
-                    path = os.path.normpath(os.path.abspath(os.path.join(root, fname)))
-                    rv.append((key, path))
+                    full_path = os.path.normpath(os.path.abspath(os.path.join(root, fname)))
+                    rv.append((key, full_path))
         else:
             raise ValueError(f"Passed file or directory '{path}' does not appear to be a file or directory.")
     return rv
@@ -87,7 +87,7 @@ def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, 
     else:
         if dry_run:
             os.remove(tmp_manifest_fname)
-            os.remove(DataManifestWriter.local_config_path(".local_config"))
+            os.remove(DataManifestWriter.local_config_path(tmp_manifest_fname))
         else:
             os.rename(tmp_manifest_fname, manifest_fname)
             os.rename(DataManifestWriter.local_config_path(tmp_manifest_fname), DataManifestWriter.local_config_path(manifest_fname))

@@ -24,7 +24,6 @@ from datamanifest.datamanifest import (
     DEFAULT_FOLDER_PERMISSIONS,
     random_string,
     environment_variables,
-    s3_uri_exists,
     _check_s3_versioning_enabled,
     MANIFEST_VERSION,
 )
@@ -593,7 +592,9 @@ def test_rebuild_of_local(manifest_fname, fast):
     # delete some files
     os.unlink(local_cache_path)
     os.unlink(local_checkout_path)
-    dm.sync(fast)
+
+    with DataManifest(manifest_fname) as dm:
+        dm.sync(fast)
 
 
 def test_get_no_validate(manifest_fname):

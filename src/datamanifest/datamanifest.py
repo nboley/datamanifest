@@ -14,10 +14,7 @@ import os
 import re
 import shutil
 import subprocess
-import grp
 from pathlib import Path
-from multiprocessing import Lock
-import random
 from contextlib import contextmanager
 import string
 import tempfile
@@ -45,48 +42,28 @@ def random_string(length):
 def environment_variables(**kwargs):
     old_env_vars = {key: os.environ.get(key) for key in kwargs if key in os.environ}
     os.environ.update(kwargs)
-    yield
-    # delete all of the new env variables
-    for key in kwargs:
-        del os.environ[key]
-    # re-add the old variables
-    os.environ.update(old_env_vars)
-
-
-def s3_uri_exists(s3_uri: str) -> bool:
-    """
-    Check if an s3 uri exists.  A bucket does not count as an s3 uri.
-    """
-    remote_path = RemotePath.from_uri(s3_uri)
-    if remote_path.path == "":
-        return False
-    s3 = boto3.resource("s3")
     try:
-        s3.Object(remote_path.bucket, remote_path.path).load()
-    except botocore.exceptions.ClientError as e:
-        if e.response["Error"]["Code"] == "404":
-            # The object does not exist.
-            return False
-        else:
-            # Something else has gone wrong.
-            raise
-    else:
-        # The object does exist.
-        return True
+        yield
+    finally:
+        # delete all of the new env variables
+        for key in kwargs:
+            del os.environ[key]
+        # re-add the old variables
+        os.environ.update(old_env_vars)
 
 
 def _check_s3_versioning_enabled(bucket_name: str) -> bool:
     """
     Check if S3 versioning is enabled on the specified bucket.
 
-    Returns True if versioning is enabled or suspended.
+    Returns True if versioning is enabled.
     Raises RuntimeError if versioning is not enabled or if we cannot check (e.g., no permissions).
     """
     s3_client = boto3.client("s3")
     try:
         response = s3_client.get_bucket_versioning(Bucket=bucket_name)
         status = response.get("Status", "")
-        if status in ["Enabled", "Suspended"]:
+        if status == "Enabled":
             return True
         else:
             raise RuntimeError(
@@ -138,12 +115,6 @@ def _extract_permissions(path):
     return int(str(oct(os.stat(path).st_mode))[-4:], base=8)
 
 
-def _makedirs_and_change_permissions(path, mode, root):
-    # note that makedirs could have created multiple directories, so we check and set group
-    # name up the tree until we find hte correct group name
-    os.makedirs(path, mode=mode, exist_ok=True)
-
-
 def hex_to_base64(hex_str):
     return (
         codecs.encode(codecs.decode(hex_str, "hex"), "base64").strip().decode("ascii")
@@ -157,19 +128,6 @@ def calc_md5sum_from_fname(fname):
         .decode("ascii")
     )
     return hex_str
-
-
-def calc_md5sum_from_fp(fp):
-    fpos = fp.tell()
-    m = hashlib.md5()
-    fp.seek(0)
-    m.update(fp.read(10000000).encode("utf8"))
-    if fp.read(1) != "":
-        raise ValueError(
-            f"{fp.name} is too large to calculate the md5 sum from this function."
-        )
-    fp.seek(fpos)
-    return m.hexdigest()
 
 
 def calc_md5sum_from_remote_uri(remote_path):
@@ -426,10 +384,9 @@ class DataManifest:
                         time.sleep(random.uniform(10, 60))
 
                 if not downloaded:
-                    logger.error(
-                        f"Error downloading '{remote_key}' to '{local_cache_path}'"
+                    raise RuntimeError(
+                        f"Failed to download '{remote_key}' after {retries} retries"
                     )
-                    raise
                 # set the permissions and group
                 os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
 
@@ -553,17 +510,22 @@ class DataManifest:
     @staticmethod
     def _load_header(fp):
         config = {}
+        header = None
+        line_i = -1
         for line_i, line in enumerate(fp):
             # skip empty lines
             if line.strip() == "":
                 continue
             if line.startswith("#"):
-                key, val = line[1:].strip().split("=")
+                key, val = line[1:].strip().split("=", maxsplit=1)
                 config[key.strip()] = val.strip()
             else:
                 # assume that we're to the header now
                 header = line.strip("\n").split("\t")
                 break
+
+        if header is None:
+            raise ValueError("No header row found in data manifest file")
 
         # validate version
         if "MANIFEST_VERSION" not in config:
@@ -759,19 +721,16 @@ class DataManifest:
         local_config_path = cls.local_config_path(manifest_fname)
         checkout_prefix = cls._init_checkout_prefix(checkout_prefix)
         local_cache_prefix = cls._init_local_cache(local_cache_prefix, manifest_config['LOCAL_CACHE_PATH_SUFFIX'])
-        try:
-            with open(local_config_path, ('w' if force else 'x')) as ofp:
-                cls._write_config(
-                    ofp,
-                    {
-                        'MANIFEST_VERSION': MANIFEST_VERSION,
-                        'CHECKOUT_PREFIX': checkout_prefix,
-                        'LOCAL_CACHE_PREFIX': local_cache_prefix,
-                    },
-                    prepend_hash=False
-                )
-        except:
-            raise
+        with open(local_config_path, ('w' if force else 'x')) as ofp:
+            cls._write_config(
+                ofp,
+                {
+                    'MANIFEST_VERSION': MANIFEST_VERSION,
+                    'CHECKOUT_PREFIX': checkout_prefix,
+                    'LOCAL_CACHE_PREFIX': local_cache_prefix,
+                },
+                prepend_hash=False
+            )
 
         return cls(manifest_fname)
 
@@ -780,8 +739,7 @@ class DataManifest:
 
     def __repr__(self):
         return (
-            f"DataManifest(key='{self.key}', "
-            f"fname='{self.fname}', "
+            f"DataManifest(fname='{self.fname}', "
             f"checkout_prefix='{self.checkout_prefix}', "
             f"local_cache_prefix='{self.local_cache_prefix}', "
             f"remote_datastore_uri='{self.remote_datastore_uri.uri}')"
@@ -831,30 +789,10 @@ class DataManifest:
 
         If fast is set to True, then skip the md5sum check.
         """
-        import concurrent.futures
-
         assert fast in [True, False]
 
         for key in tqdm(self.keys(), disable=not progress_bar):
             self.sync_record(key, fast=fast)
-        return
-
-        ## Parallel version -- pretty buggy
-        # We can use a with statement to ensure threads are cleaned up promptly
-        with tqdm(total=len(self.keys()), disable=not progress_bar) as pb:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # Start the load operations and mark each future with its URL
-                future_to_key = {
-                    executor.submit(sync_record, key): key for key in self.keys()
-                }
-                for future in concurrent.futures.as_completed(future_to_key):
-                    key = future_to_key[future]
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        print("%r generated an exception: %s" % (key, exc))
-                    else:
-                        pb.update(1)
 
     def validate(self, fast=False):
         for key in self.keys():
@@ -1045,6 +983,8 @@ class DataManifestWriter(DataManifest):
                 "Attempting to restore original file, but data manifest may be corrupted. \n"
                 "{}".format(inst)
             )
+            self._fp.seek(0)
+            self._fp.truncate()
             self._fp.write(backup)
             self._fp.flush()
             os.fsync(self._fp)
@@ -1075,7 +1015,7 @@ class DataManifestWriter(DataManifest):
     def _add_or_update(self, key, fname_to_add, notes, is_update):
         """Add or update a file in the manifest.
 
-        Add a file to the manifest and upload the file to GCS.
+        Add a file to the manifest and upload the file to S3.
         """
         validate_key(key)
 
@@ -1110,7 +1050,7 @@ class DataManifestWriter(DataManifest):
         self._save_to_disk()
 
     def add(self, key, fname_to_add, notes="", exists_ok=False):
-        """Add a file to the manifest and upload to gcp."""
+        """Add a file to the manifest and upload to S3."""
         try:
             self._add_or_update(key, fname_to_add, notes, is_update=False)
         except KeyAlreadyExistsError:
@@ -1121,7 +1061,7 @@ class DataManifestWriter(DataManifest):
             )
 
     def update(self, key, fname_to_add, notes=""):
-        """Update a file that is in the manifest and upload to gcp."""
+        """Update a file that is in the manifest and upload to S3."""
         self._add_or_update(key, fname_to_add, notes, is_update=True)
 
     def delete(self, key, delete_from_datastore=False):

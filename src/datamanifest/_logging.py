@@ -49,6 +49,7 @@ class FileDescriptorLogger(int):
 
     def __init__(self, logger, level=DEFAULT_FILE_DESCRIPTOR_LOG_LEVEL):
         int.__init__(self)
+        self._closed = False
         self.logger = logger
         self.level = level
         # writer is set in the __new__ method
@@ -97,12 +98,15 @@ class FileDescriptorLogger(int):
     def start_worker_thread(reader, logger, level):
         def process_data_and_exit_thread(reader, logger, level):
             FileDescriptorLogger.write_data_to_logger(reader, logger, level, False)
-            sys.exit()
+            return
 
         t = Thread(target=process_data_and_exit_thread, args=(reader, logger, level))
         t.start()
 
-    def __del__(self):
+    def _cleanup(self):
+        if getattr(self, '_closed', False):
+            return
+        self._closed = True
         # flush buffers from (move data from writer -> reader)
         self.writer.flush()
         # close the writer
@@ -112,8 +116,11 @@ class FileDescriptorLogger(int):
         # finally close the reader
         self.reader.close()
 
+    def __del__(self):
+        self._cleanup()
+
     def close(self):
-        self.__del__()
+        self._cleanup()
 
     def flush(self):
         self.writer.flush()

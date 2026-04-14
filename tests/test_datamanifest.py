@@ -12,7 +12,9 @@ import pytest
 from datamanifest.datamanifest import (
     DataManifest,
     DataManifestWriter,
+    DataManifestRecord,
     FileMismatchError,
+    InvalidPrefix,
     KeyAlreadyExistsError,
     InvalidKey,
     MissingFileError,
@@ -759,8 +761,8 @@ def test_local_config_wrong_version(cleandir):
         DataManifest(manifest_path)
 
 
-def test_version_mismatch_between_manifest_and_local_config(cleandir):
-    """Test that mismatched versions between manifest and local config raises ValueError."""
+def test_mixed_supported_versions_accepted(cleandir):
+    """Test that mixed supported versions (v2 manifest + v3 local config) are accepted."""
     manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
     # Write manifest with version 2
     with open(manifest_path, "w") as f:
@@ -768,14 +770,50 @@ def test_version_mismatch_between_manifest_and_local_config(cleandir):
         f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
         f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
         f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
-    
+
     # Write local config with version 3
     with open(manifest_path + ".local_config", "w") as f:
         f.write("MANIFEST_VERSION=3\n")
         f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
         f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
-    
-    # This should fail on local config validation (version 3 != expected)
+
+    # Mixed supported versions should now be accepted (v3 code reads both v2 and v3)
+    dm = DataManifest(manifest_path)
+    dm.close()
+
+
+def test_unsupported_version_in_header_rejected(cleandir):
+    """Test that unsupported version in manifest header is rejected."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write("#MANIFEST_VERSION=99\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    with pytest.raises(ValueError, match="MANIFEST_VERSION mismatch"):
+        DataManifest(manifest_path)
+
+
+def test_unsupported_version_in_local_config_rejected(cleandir):
+    """Test that unsupported version in local config is rejected."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write("MANIFEST_VERSION=99\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
     with pytest.raises(ValueError, match="MANIFEST_VERSION mismatch"):
         DataManifest(manifest_path)
 
@@ -847,3 +885,209 @@ def test_empty_version_id_in_manifest(cleandir):
     
     with pytest.raises(ValueError, match="s3_version_id is required and cannot be empty"):
         DataManifest(manifest_path)
+
+
+# =============================================================================
+# Unit tests for v3 features (no S3 required)
+# =============================================================================
+
+def test_is_multipart_etag():
+    from datamanifest.datamanifest import is_multipart_etag
+    assert is_multipart_etag("abc123-3") is True
+    assert is_multipart_etag("abc123") is False
+    assert is_multipart_etag("") is False
+
+
+def test_remote_path_skip_validation():
+    """Test RemotePath.from_uri with skip_validation for paths with special chars."""
+    rp = RemotePath.from_uri("s3://bucket/path with spaces/file.txt", skip_validation=True)
+    assert rp.scheme == "s3"
+    assert rp.bucket == "bucket"
+    assert rp.path == "path with spaces/file.txt"
+    assert rp.version_id == ""
+
+    # Without skip_validation, special chars should fail
+    with pytest.raises(InvalidPrefix):
+        RemotePath.from_uri("s3://bucket/path with spaces/file.txt")
+
+
+def test_remote_path_skip_validation_preserves_on_replace():
+    """Test that dataclasses.replace preserves _skip_validation."""
+    import dataclasses
+    rp = RemotePath.from_uri("s3://bucket/path with spaces/file.txt", skip_validation=True)
+    rp2 = dataclasses.replace(rp, version_id="v123")
+    assert rp2._skip_validation is True
+    assert rp2.version_id == "v123"
+    assert rp2.path == "path with spaces/file.txt"
+
+
+def test_default_header_v3():
+    """Test that default_header returns 7 columns in correct order."""
+    header = DataManifest.default_header()
+    assert len(header) == 7
+    assert header == ["key", "s3_version_id", "md5sum", "s3_hash", "size", "source_uri", "notes"]
+
+
+def test_datamanifest_record_is_external():
+    """Test the is_external property on DataManifestRecord."""
+    rp = RemotePath("s3", "bucket", "path", "v1")
+    # Regular record (no source_uri)
+    r = DataManifestRecord(key="test", md5sum="abc", s3_hash="def", size=100,
+                           notes="", path="/tmp/test", remote_uri=rp)
+    assert r.is_external is False
+    assert r.source_uri == ""
+
+    # External record
+    r2 = DataManifestRecord(key="test", md5sum="abc", s3_hash="def", size=100,
+                            notes="", path="/tmp/test", remote_uri=rp,
+                            source_uri="s3://other/path")
+    assert r2.is_external is True
+
+
+def test_get_local_cache_path_uses_s3_hash(cleandir):
+    """Test that get_local_cache_path uses s3_hash when present, md5sum as fallback."""
+    from datamanifest.datamanifest import DataManifest
+    # s3_hash present: should use s3_hash
+    record_with_hash = DataManifestRecord(
+        key="file.txt", md5sum="md5abc", s3_hash="s3hashdef", size=100,
+        notes="", path="/tmp/file.txt",
+        remote_uri=RemotePath("s3", "bucket", "path", "v1"),
+    )
+    file_hash = record_with_hash.s3_hash if record_with_hash.s3_hash else record_with_hash.md5sum
+    assert file_hash == "s3hashdef"
+
+    # s3_hash empty (v2 legacy): should fall back to md5sum
+    record_no_hash = DataManifestRecord(
+        key="file.txt", md5sum="md5abc", s3_hash="", size=100,
+        notes="", path="/tmp/file.txt",
+        remote_uri=RemotePath("s3", "bucket", "path", "v1"),
+    )
+    file_hash2 = record_no_hash.s3_hash if record_no_hash.s3_hash else record_no_hash.md5sum
+    assert file_hash2 == "md5abc"
+
+
+def test_v2_manifest_read_by_v3_reader(cleandir):
+    """Test that v3 reader can open a v2-format manifest (5 columns)."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    # Write a v2-format manifest
+    with open(manifest_path, "w") as f:
+        f.write("#MANIFEST_VERSION=2\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\tsize\tnotes\n")
+        f.write("myfile.txt\tv1\tabc123\t100\tsome notes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    dm = DataManifest(manifest_path)
+    record = dm.get("myfile.txt", validate=False)
+    assert record.key == "myfile.txt"
+    assert record.md5sum == "abc123"
+    assert record.s3_hash == ""  # v2 records have no s3_hash
+    assert record.source_uri == ""  # v2 records have no source_uri
+    assert record.is_external is False
+    assert record.size == 100
+    dm.close()
+
+
+def test_v3_manifest_with_external_record(cleandir):
+    """Test reading a v3 manifest with an external record."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes\n")
+        # Regular record
+        f.write("regular.txt\tv1\tabc123\tdef456\t100\t\tregular notes\n")
+        # External record (empty version_id is OK for external)
+        f.write("external.txt\t\t\texternal_etag\t200\ts3://other-bucket/data.txt\texternal notes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    dm = DataManifest(manifest_path)
+    # Check regular record
+    regular = dm.get("regular.txt", validate=False)
+    assert regular.is_external is False
+    assert regular.s3_hash == "def456"
+    assert regular.source_uri == ""
+
+    # Check external record
+    external = dm.get("external.txt", validate=False)
+    assert external.is_external is True
+    assert external.s3_hash == "external_etag"
+    assert external.source_uri == "s3://other-bucket/data.txt"
+    assert external.remote_uri.bucket == "other-bucket"
+    assert external.remote_uri.path == "data.txt"
+    dm.close()
+
+
+def test_source_uri_rejects_embedded_version_id(cleandir):
+    """Test that _read_records rejects source_uri with embedded ?versionId."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes\n")
+        f.write("bad.txt\tv1\tabc\tdef\t100\ts3://bucket/file?versionId=xxx\tnotes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    with pytest.raises(ValueError, match="source_uri.*contains.*versionId"):
+        DataManifest(manifest_path)
+
+
+def test_empty_version_id_accepted_for_external(cleandir):
+    """Test that empty s3_version_id is accepted for external records."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes\n")
+        f.write("ext.txt\t\t\tetag123\t50\ts3://other/file.txt\t\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    dm = DataManifest(manifest_path)
+    record = dm.get("ext.txt", validate=False)
+    assert record.s3_version_id == ""
+    assert record.is_external is True
+    dm.close()
+
+
+def test_verify_record_empty_md5sum():
+    """Test _verify_record_matches_file with empty md5sum only checks size."""
+    import tempfile
+    rp = RemotePath("s3", "bucket", "path", "v1")
+    record = DataManifestRecord(key="test", md5sum="", s3_hash="etag123", size=5,
+                                notes="", path="/tmp/test", remote_uri=rp)
+
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        f.write("hello")
+        tmp_path = f.name
+
+    try:
+        # Should pass - size matches, md5sum check skipped because md5sum is empty
+        DataManifest._verify_record_matches_file(record, tmp_path, check_md5sum=True)
+
+        # Should fail - wrong size
+        record_bad_size = DataManifestRecord(key="test", md5sum="", s3_hash="etag123", size=999,
+                                             notes="", path="/tmp/test", remote_uri=rp)
+        with pytest.raises(FileMismatchError):
+            DataManifest._verify_record_matches_file(record_bad_size, tmp_path, check_md5sum=True)
+    finally:
+        os.unlink(tmp_path)

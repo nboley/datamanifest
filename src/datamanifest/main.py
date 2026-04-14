@@ -116,6 +116,11 @@ def delete_main(manifest_fname, key, delete_from_datastore, force_delete=False):
     dm.delete(key, delete_from_datastore=delete_from_datastore)
 
 
+def add_s3_main(manifest_fname, key, s3_uri, notes=""):
+    dm = DataManifestWriter(manifest_fname)
+    dm.add_external(key, s3_uri, notes=notes)
+
+
 def sync_main(manifest_fname, fast, progress_bar=True):
     dm = DataManifest(manifest_fname)
     dm.sync(fast=fast, progress_bar=progress_bar)
@@ -180,6 +185,15 @@ def parse_args():
         help="Delete the file from the datastore.",
     )
 
+    add_s3_subparser = subparsers.add_parser(
+        "add-s3",
+        help="Add an existing S3 object to the manifest without re-uploading",
+    )
+    add_s3_subparser.add_argument("manifest-path", help="Path to the manifest TSV file")
+    add_s3_subparser.add_argument("key", help="Manifest key (relative path)")
+    add_s3_subparser.add_argument("s3-uri", help="Full S3 URI (optionally with ?versionId=...)")
+    add_s3_subparser.add_argument("--notes", default="", help="Optional annotation")
+
     add_subdirectory_subparser = subparsers.add_parser(
         "add-multiple", help="add files to a data manifest by traversing a directory. Keys are inferred from relative file path.",
     )
@@ -232,6 +246,13 @@ def main():
         update_main(getattr(args, 'manifest-path'), args.key, args.path, args.notes)
     elif args.command == "delete":
         delete_main(getattr(args, 'manifest-path'), args.key, args.delete_from_datastore)
+    elif args.command == "add-s3":
+        add_s3_main(
+            manifest_fname=getattr(args, "manifest-path"),
+            key=args.key,
+            s3_uri=getattr(args, "s3-uri"),
+            notes=args.notes,
+        )
     elif args.command == "add-multiple":
         add_subdirectory_main(
             manifest_fname=getattr(args, 'manifest-path'),

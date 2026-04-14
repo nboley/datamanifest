@@ -20,12 +20,13 @@ import string
 import tempfile
 
 from tqdm import tqdm
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from .config import (
     DEFAULT_FOLDER_PERMISSIONS,
     DEFAULT_FILE_PERMISSIONS,
     MANIFEST_VERSION,
+    SUPPORTED_MANIFEST_VERSIONS,
 )
 
 
@@ -176,22 +177,27 @@ def validate_local_prefix(prefix):
         )
 
 
+def is_multipart_etag(etag: str) -> bool:
+    """Return True if the ETag indicates a multipart upload."""
+    return "-" in etag
+
+
 @dataclasses.dataclass
 class RemotePath:
     scheme: str
     bucket: str
     path: str
     version_id: str = ""
+    _skip_validation: bool = dataclasses.field(default=False, repr=False, compare=False)
 
     @classmethod
-    def from_uri(cls, uri):
+    def from_uri(cls, uri, skip_validation=False):
         parsed_uri = urlparse(uri)
-        assert parsed_uri.params == ""
-        assert parsed_uri.fragment == ""
-        # Parse version_id from query string if present
+        if not skip_validation:
+            assert parsed_uri.params == ""
+            assert parsed_uri.fragment == ""
         version_id = ""
         if parsed_uri.query:
-            from urllib.parse import parse_qs
             query_params = parse_qs(parsed_uri.query)
             if "versionId" in query_params:
                 version_id = query_params["versionId"][0]
@@ -199,15 +205,17 @@ class RemotePath:
             parsed_uri.scheme,
             parsed_uri.netloc,
             parsed_uri.path.lstrip("/"),
-            version_id
+            version_id,
+            _skip_validation=skip_validation,
         )
 
     def __post_init__(self):
         if self.scheme != "s3":
-            raise NotImplementedError(
+            raise ValueError(
                 "DataManifest currently only supports s3 for the remote cache."
             )
-        _validate_prefix(self.path, InvalidPrefix)
+        if not self._skip_validation:
+            _validate_prefix(self.path, InvalidPrefix)
 
     @property
     def uri(self):
@@ -221,10 +229,16 @@ class RemotePath:
 class DataManifestRecord:
     key: str
     md5sum: str
+    s3_hash: str
     size: int
     notes: str
     path: str
     remote_uri: RemotePath
+    source_uri: str = ""
+
+    @property
+    def is_external(self) -> bool:
+        return bool(self.source_uri)
 
     @property
     def s3_version_id(self) -> str:
@@ -233,11 +247,33 @@ class DataManifestRecord:
 
     @staticmethod
     def header() -> List[str]:
-        return ["key", "s3_version_id", "md5sum", "size", "notes", "path", "remote_uri"]
+        return ["key", "s3_version_id", "md5sum", "s3_hash", "size", "source_uri", "notes", "path", "remote_uri"]
 
 
 class DataManifest:
-    def _build_new_data_manifest_record(self, key, fname_to_add, notes, s3_version_id=""):
+    @staticmethod
+    def _get_s3_object_metadata(s3_uri: str) -> dict:
+        """Call head_object on an S3 URI. Returns dict with etag, size, version_id, encryption, sse_customer_algorithm."""
+        remote = RemotePath.from_uri(s3_uri, skip_validation=True)
+        s3_client = boto3.client("s3")
+        kwargs = {"Bucket": remote.bucket, "Key": remote.path}
+        if remote.version_id:
+            kwargs["VersionId"] = remote.version_id
+
+        response = s3_client.head_object(**kwargs)
+
+        version_id = response.get("VersionId", "")
+        if version_id == "null":
+            version_id = ""
+        return {
+            "etag": response["ETag"].strip('"'),
+            "size": response["ContentLength"],
+            "version_id": version_id,
+            "encryption": response.get("ServerSideEncryption", ""),
+            "sse_customer_algorithm": response.get("SSECustomerAlgorithm", ""),
+        }
+
+    def _build_new_data_manifest_record(self, key, fname_to_add, notes):
         # find the file's file size and calculate the checksum
         logger.info(f"Calculating md5sum for '{fname_to_add}'")
         md5sum = calc_md5sum_from_fname(fname_to_add)
@@ -246,14 +282,16 @@ class DataManifest:
         logger.info(f"Calculated filesize '{fsize}' for '{fname_to_add}'.")
 
         return DataManifestRecord(
-            key,
-            md5sum,
-            fsize,
+            key=key,
+            md5sum=md5sum,
+            s3_hash="",
+            size=fsize,
             notes=notes,
             path=self._build_checkout_path(self.checkout_prefix, key),
             remote_uri=self._build_remote_datastore_uri(
-                self.remote_datastore_uri, key, s3_version_id
+                self.remote_datastore_uri, key
             ),
+            source_uri="",
         )
 
     @staticmethod
@@ -282,7 +320,7 @@ class DataManifest:
             )
 
         # ensure the md5sum matches
-        if check_md5sum:
+        if check_md5sum and record.md5sum:
             logger.info(f"Calculating md5sum for '{fpath}'.")
             local_md5sum = calc_md5sum_from_fname(fpath)
             logger.debug(
@@ -306,6 +344,11 @@ class DataManifest:
         local_abs_path = self._data[key].path
         # check that the file exists
         if not os.path.exists(local_abs_path):
+            if self._data[key].is_external:
+                raise MissingFileError(
+                    f"External record '{key}' has not been synced yet. "
+                    f"Run 'dm sync' to download the file before validating."
+                )
             raise MissingFileError(f"Can not find '{key}' at '{local_abs_path}'")
 
         return self._verify_record_matches_file(
@@ -358,7 +401,7 @@ class DataManifest:
             else:
                 # if it doesn't then download the file (using version ID)
                 s3 = boto3.resource("s3")
-                bucket = s3.Bucket(self.remote_datastore_uri.bucket)
+                bucket = s3.Bucket(self._data[key].remote_uri.bucket)
                 remote_key = self._data[key].remote_uri.path
                 version_id = self._data[key].s3_version_id
                 logger.info(f"Downloading '{remote_key}' (version: {version_id})")
@@ -367,12 +410,13 @@ class DataManifest:
                     raise RuntimeError(
                         f"local_cache_path '{local_cache_path}' already exists (this is unexpected)"
                     )
+                extra_args = {'VersionId': version_id} if version_id else {}
                 downloaded = False
                 for rr in range(retries):
                     try:
                         remote_object.download_file(
-                            local_cache_path,
-                            ExtraArgs={'VersionId': version_id}
+                            str(local_cache_path),
+                            ExtraArgs=extra_args
                         )
                         downloaded = True
                         break
@@ -421,9 +465,9 @@ class DataManifest:
             os.symlink(local_cache_path, local_path)
 
     @staticmethod
-    def _build_datastore_suffix(key, md5sum):
+    def _build_datastore_suffix(key, file_hash):
         return os.path.join(
-            os.path.dirname(key), f"./{md5sum}-" + os.path.basename(key)
+            os.path.dirname(key), f"./{file_hash}-" + os.path.basename(key)
         )
 
     @classmethod
@@ -442,10 +486,12 @@ class DataManifest:
         )
 
     def get_local_cache_path(self, key):
+        record = self._data[key]
+        file_hash = record.s3_hash if record.s3_hash else record.md5sum
         return os.path.normpath(
             os.path.join(
                 self.local_cache_prefix,
-                self._build_datastore_suffix(key, self._data[key].md5sum),
+                self._build_datastore_suffix(key, file_hash),
             )
         )
 
@@ -500,10 +546,10 @@ class DataManifest:
             raise ValueError(
                 f"MANIFEST_VERSION not found in local config file '{cls.local_config_path(manifest_path)}'"
             )
-        if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
+        if config["MANIFEST_VERSION"] not in SUPPORTED_MANIFEST_VERSIONS:
             raise ValueError(
                 f"MANIFEST_VERSION mismatch in local config file '{cls.local_config_path(manifest_path)}': "
-                f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
+                f"expected one of {sorted(SUPPORTED_MANIFEST_VERSIONS)}, found '{config['MANIFEST_VERSION']}'"
             )
         return config
 
@@ -532,10 +578,10 @@ class DataManifest:
             raise ValueError(
                 "MANIFEST_VERSION not found in data manifest header"
             )
-        if config["MANIFEST_VERSION"] != MANIFEST_VERSION:
+        if config["MANIFEST_VERSION"] not in SUPPORTED_MANIFEST_VERSIONS:
             raise ValueError(
                 f"MANIFEST_VERSION mismatch in data manifest: "
-                f"expected '{MANIFEST_VERSION}', found '{config['MANIFEST_VERSION']}'"
+                f"expected one of {sorted(SUPPORTED_MANIFEST_VERSIONS)}, found '{config['MANIFEST_VERSION']}'"
             )
 
         fp.seek(0)
@@ -544,6 +590,7 @@ class DataManifest:
     def _read_records(self, header_offset):
         # read all of the file contents into memory
         data = {}
+        is_v3 = len(self.header) >= len(self.default_header())
         for line_i, line in enumerate(self._fp):
             # skip until we are below the header
             if line_i <= header_offset:
@@ -553,38 +600,72 @@ class DataManifest:
                 continue
 
             # parse and store this record to the ordered dict
-            # Column order: ["key", "s3_version_id", "md5sum", "size", "notes"]
             parts = line.strip("\n").split("\t")
-            if len(parts) < 4:
-                raise ValueError(
-                    f"Invalid record format in '{self.fname}' at line {line_i + 1}: "
-                    f"expected at least 4 columns (key, s3_version_id, md5sum, size), got {len(parts)}"
-                )
-            key = parts[0]
-            s3_version_id = parts[1]
-            md5sum = parts[2]
-            size = parts[3]
-            notes = parts[4] if len(parts) > 4 else ""
-            
-            # validate s3_version_id is not empty
-            if not s3_version_id or not s3_version_id.strip():
+            if is_v3:
+                # v3 columns: key, s3_version_id, md5sum, s3_hash, size, source_uri, notes
+                if len(parts) < 6:
+                    raise ValueError(
+                        f"Invalid record format in '{self.fname}' at line {line_i + 1}: "
+                        f"expected at least 6 columns, got {len(parts)}"
+                    )
+                key = parts[0]
+                s3_version_id = parts[1]
+                md5sum = parts[2]
+                s3_hash = parts[3]
+                size = parts[4]
+                source_uri = parts[5]
+                notes = parts[6] if len(parts) > 6 else ""
+            else:
+                # v2 columns: key, s3_version_id, md5sum, size, notes
+                if len(parts) < 4:
+                    raise ValueError(
+                        f"Invalid record format in '{self.fname}' at line {line_i + 1}: "
+                        f"expected at least 4 columns (key, s3_version_id, md5sum, size), got {len(parts)}"
+                    )
+                key = parts[0]
+                s3_version_id = parts[1]
+                md5sum = parts[2]
+                size = parts[3]
+                notes = parts[4] if len(parts) > 4 else ""
+                s3_hash = ""
+                source_uri = ""
+
+            # validate s3_version_id is not empty (only for regular records)
+            if (not s3_version_id or not s3_version_id.strip()) and not source_uri:
                 raise ValueError(
                     f"s3_version_id is required and cannot be empty for key '{key}' "
                     f"in '{self.fname}' at line {line_i + 1}"
                 )
-            
+
             # make sure the key follows the naming convention
             validate_key(key)
 
-            record = DataManifestRecord(
-                key,
-                md5sum,
-                int(size),
-                notes,
-                path=self._build_checkout_path(self.checkout_prefix, key),
-                remote_uri=self._build_remote_datastore_uri(
+            # build remote_uri based on record type
+            if source_uri:
+                # External record: remote_uri from source_uri + version_id
+                remote_uri = RemotePath.from_uri(source_uri, skip_validation=True)
+                if remote_uri.version_id:
+                    raise ValueError(
+                        f"source_uri for key '{key}' contains '?versionId=...' at line {line_i + 1}. "
+                        "Version IDs must be stored in the s3_version_id column, not embedded in source_uri."
+                    )
+                if s3_version_id:
+                    remote_uri = dataclasses.replace(remote_uri, version_id=s3_version_id)
+            else:
+                # Regular record: remote_uri from manifest base + key
+                remote_uri = self._build_remote_datastore_uri(
                     self.remote_datastore_uri, key, s3_version_id
-                ),
+                )
+
+            record = DataManifestRecord(
+                key=key,
+                md5sum=md5sum,
+                s3_hash=s3_hash,
+                size=int(size),
+                notes=notes,
+                path=self._build_checkout_path(self.checkout_prefix, key),
+                remote_uri=remote_uri,
+                source_uri=source_uri,
             )
             if record.key in data:
                 raise KeyAlreadyExistsError(
@@ -633,13 +714,6 @@ class DataManifest:
 
         # the local config file should be written by a call to checkout
         local_config = self._read_local_config(manifest_fname)
-        # validate that manifest and local config versions match
-        if manifest_config["MANIFEST_VERSION"] != local_config["MANIFEST_VERSION"]:
-            raise ValueError(
-                f"MANIFEST_VERSION mismatch between manifest file '{manifest_fname}' "
-                f"('{manifest_config['MANIFEST_VERSION']}') and local config file "
-                f"('{local_config['MANIFEST_VERSION']}')"
-            )
         try:
             self.checkout_prefix = local_config['CHECKOUT_PREFIX']
         except KeyError:
@@ -809,6 +883,10 @@ class DataManifestWriter(DataManifest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        # Upgrade v2 header to v3 if needed
+        if len(self.header) < len(self.default_header()):
+            self.header = self.default_header()
+
         # open a non-blocking exclusive lock. This prevents any other process from reading or writing
         # this data manifest until we've closed the writer.
         fcntl.flock(self._fp, fcntl.LOCK_UN)
@@ -877,6 +955,13 @@ class DataManifestWriter(DataManifest):
 
         We probably don't want to do this very often, but it can be useful if we make a mistake.
         """
+        record = self._data[key]
+        if record.is_external:
+            raise ValueError(
+                "Cannot delete external S3 objects from the datastore. "
+                "External records reference objects we do not own. "
+                "Use delete(key) without delete_from_datastore=True to remove the reference only."
+            )
         # delete from the local cache
         local_cache_path = self.get_local_cache_path(key)
         if os.path.exists(local_cache_path):
@@ -905,18 +990,18 @@ class DataManifestWriter(DataManifest):
         remote_key = self._data[key].remote_uri.path
         version_id = self._data[key].s3_version_id
         logger.debug(f"Deleting s3://{bucket_name}/{remote_key} (version: {version_id})")
-        s3_client.delete_object(
-            Bucket=bucket_name,
-            Key=remote_key,
-            VersionId=version_id
-        )
+        delete_kwargs = {"Bucket": bucket_name, "Key": remote_key}
+        if version_id:
+            delete_kwargs["VersionId"] = version_id
+        s3_client.delete_object(**delete_kwargs)
 
     def _upload_to_s3(self, key, fname_to_add):
-        """Upload file to S3 and return the version ID.
-        
+        """Upload file to S3 and return the version ID and ETag.
+
         Returns:
-            str: The S3 version ID of the uploaded object.
-            
+            tuple: (version_id, etag) where version_id is the S3 version ID
+                and etag is the S3 ETag (quotes stripped).
+
         Raises:
             RuntimeError: If the bucket doesn't have versioning enabled (no version ID returned).
         """
@@ -939,8 +1024,9 @@ class DataManifestWriter(DataManifest):
                 f"Ensure versioning is enabled on the bucket."
             )
         
-        logger.debug(f"Uploaded '{remote_key}' with version ID '{version_id}'")
-        return version_id
+        etag = response["ETag"].strip('"')
+        logger.debug(f"Uploaded '{remote_key}' with version ID '{version_id}', ETag '{etag}'")
+        return version_id, etag
 
     def write_tsv(self, ofstream):
         self._write_config(
@@ -955,13 +1041,13 @@ class DataManifestWriter(DataManifest):
         )
         ofstream.write("\t".join(self.header) + "\n")
         for record in self.values():
-            # Write record in TSV format: key, s3_version_id, md5sum, size, notes
-            # Note: s3_version_id is a property derived from remote_uri.version_id
             row = [
                 record.key,
                 record.s3_version_id,
                 record.md5sum,
+                record.s3_hash,
                 str(record.size),
+                record.source_uri,
                 record.notes,
             ]
             ofstream.write("\t".join(row) + "\n")
@@ -1019,6 +1105,12 @@ class DataManifestWriter(DataManifest):
         """
         validate_key(key)
 
+        if is_update and key in self._data and self._data[key].is_external:
+            raise ValueError(
+                "External S3 references are immutable. "
+                "Delete and re-add instead."
+            )
+
         if is_update:
             old_local_path = self._data[key].path
             if key not in self:
@@ -1033,11 +1125,11 @@ class DataManifestWriter(DataManifest):
         # add the data record into the object (version_id will be set after upload)
         self._data[key] = self._build_new_data_manifest_record(key, fname_to_add, notes)
         # Add the file to the remote datastore and get the version ID
-        version_id = self._upload_to_s3(key, fname_to_add)
-        # Update the record's remote_uri with the version ID
+        version_id, etag = self._upload_to_s3(key, fname_to_add)
+        # Update the record's remote_uri with the version ID and s3_hash with the ETag
         old_remote_uri = self._data[key].remote_uri
         new_remote_uri = dataclasses.replace(old_remote_uri, version_id=version_id)
-        self._data[key] = dataclasses.replace(self._data[key], remote_uri=new_remote_uri)
+        self._data[key] = dataclasses.replace(self._data[key], remote_uri=new_remote_uri, s3_hash=etag)
         # Copy the file to the local cache
         self._copy_local_file_to_local_cache(key, fname_to_add)
         if is_update:
@@ -1056,9 +1148,60 @@ class DataManifestWriter(DataManifest):
         except KeyAlreadyExistsError:
             if not exists_ok:
                 raise
+            if self._data[key].is_external:
+                raise ValueError(
+                    f"Key '{key}' exists as an external reference. "
+                    "Cannot use exists_ok=True with external records. "
+                    "Delete and re-add instead."
+                )
             self._verify_record_matches_file(
                 self._data[key], fname_to_add, check_md5sum=False
             )
+
+    def add_external(self, key, s3_uri, notes=""):
+        """Add an external S3 object to the manifest without downloading it."""
+        validate_key(key)
+        if key in self._data:
+            raise ValueError(f"Key '{key}' already exists. Delete first to re-add.")
+
+        metadata = self._get_s3_object_metadata(s3_uri)
+        etag = metadata["etag"]
+        size = metadata["size"]
+        version_id = metadata["version_id"]
+
+        encryption = metadata["encryption"]
+        is_opaque_etag = (
+            is_multipart_etag(etag)
+            or encryption in ("aws:kms", "aws:kms:dkek")
+            or bool(metadata.get("sse_customer_algorithm"))
+        )
+        md5sum = "" if is_opaque_etag else etag
+
+        parsed = RemotePath.from_uri(s3_uri, skip_validation=True)
+        source_uri = f"s3://{parsed.bucket}/{parsed.path}"
+
+        if '\t' in source_uri or '\n' in source_uri or '\r' in source_uri:
+            raise ValueError(
+                f"source_uri contains characters that would corrupt the TSV format: {source_uri!r}"
+            )
+
+        remote_uri = RemotePath.from_uri(source_uri, skip_validation=True)
+        if version_id:
+            remote_uri = dataclasses.replace(remote_uri, version_id=version_id)
+
+        record = DataManifestRecord(
+            key=key,
+            md5sum=md5sum,
+            s3_hash=etag,
+            size=size,
+            notes=notes,
+            path=self._build_checkout_path(self.checkout_prefix, key),
+            remote_uri=remote_uri,
+            source_uri=source_uri,
+        )
+
+        self._data[key] = record
+        self._save_to_disk()
 
     def update(self, key, fname_to_add, notes=""):
         """Update a file that is in the manifest and upload to S3."""
@@ -1071,6 +1214,13 @@ class DataManifestWriter(DataManifest):
         """
         if key not in self:
             raise KeyError(f"'{key}' does not exist in '{self.fname}'")
+        record = self._data[key]
+        if delete_from_datastore and record.is_external:
+            raise ValueError(
+                "Cannot delete external S3 objects from the datastore. "
+                "External records reference objects we do not own. "
+                "Use delete(key) without delete_from_datastore=True to remove the reference only."
+            )
         # remove the symlink
         if os.path.exists(self._data[key].path):
             assert os.path.islink(self._data[key].path)

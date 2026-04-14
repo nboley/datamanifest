@@ -1091,3 +1091,238 @@ def test_verify_record_empty_md5sum():
             DataManifest._verify_record_matches_file(record_bad_size, tmp_path, check_md5sum=True)
     finally:
         os.unlink(tmp_path)
+
+
+# =============================================================================
+# Integration tests for add-s3 (add_external) feature
+# =============================================================================
+
+def test_add_external_basic(manifest_fname):
+    """add_external registers an S3 object without downloading it."""
+    # Get the remote URI of an existing file in the manifest
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/ref.txt", base_uri, notes="external ref")
+        ext_record = manifest.get("ext/ref.txt", validate=False)
+        assert ext_record.is_external is True
+        assert ext_record.source_uri != ""
+        assert ext_record.s3_hash != ""
+        assert not os.path.exists(ext_record.path)
+
+    # Round-trip: reopen as read-only and verify fields are preserved
+    with DataManifest(manifest_fname) as dm2:
+        reloaded = dm2.get("ext/ref.txt", validate=False)
+        assert reloaded.is_external is True
+        assert reloaded.source_uri == ext_record.source_uri
+        assert reloaded.s3_hash == ext_record.s3_hash
+        assert reloaded.size == ext_record.size
+
+
+def test_add_external_sync_and_validate(manifest_fname, cleandir2):
+    """After add_external + sync, the file is downloaded and validate passes."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/synced.txt", base_uri)
+
+    with DataManifest(manifest_fname) as dm:
+        dm.sync()
+        ext_record = dm.get("ext/synced.txt", validate=False)
+        assert os.path.exists(ext_record.path)
+        with open(ext_record.path) as fp:
+            assert fp.read() == "A" * 8
+        dm.validate()
+
+
+def test_add_external_delete_reference(manifest_fname):
+    """delete(key) on an external record removes it from the manifest."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/to_delete.txt", base_uri)
+        assert "ext/to_delete.txt" in manifest
+        manifest.delete("ext/to_delete.txt")
+        assert "ext/to_delete.txt" not in manifest
+
+    with DataManifest(manifest_fname) as dm:
+        assert "ext/to_delete.txt" not in dm
+
+
+def test_add_external_delete_from_datastore_blocked(manifest_fname):
+    """delete(key, delete_from_datastore=True) on an external record raises ValueError."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/nodelete.txt", base_uri)
+        with pytest.raises(ValueError, match="[Ee]xternal"):
+            manifest.delete("ext/nodelete.txt", delete_from_datastore=True)
+
+
+def test_add_external_update_blocked(manifest_fname):
+    """update() on an external record raises ValueError with 'immutable' in message."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    local_path = os.path.abspath("update_payload.txt")
+    with open(local_path, "w") as fp:
+        fp.write("new content")
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/immutable.txt", base_uri)
+        with pytest.raises(ValueError, match="[Ii]mmutable"):
+            manifest.update("ext/immutable.txt", local_path)
+
+
+def test_add_external_duplicate_key(manifest_fname):
+    """add_external with an existing key raises ValueError."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        with pytest.raises(ValueError, match="[Aa]lready exists"):
+            manifest.add_external("eight_As.txt", base_uri)
+
+
+def test_add_exists_ok_blocked_for_external(manifest_fname):
+    """add(key, path, exists_ok=True) raises ValueError when key is an external record."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+
+    local_path = os.path.abspath("exists_ok_payload.txt")
+    with open(local_path, "w") as fp:
+        fp.write("A" * 8)
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/exists_ok_test.txt", base_uri)
+        with pytest.raises(ValueError, match="[Ee]xternal"):
+            manifest.add("ext/exists_ok_test.txt", local_path, exists_ok=True)
+
+
+def test_s3_hash_captured_on_regular_add(manifest_fname):
+    """Regular records stored by add() have a non-empty s3_hash."""
+    with DataManifest(manifest_fname) as dm:
+        for record in dm:
+            assert record.s3_hash != "", f"s3_hash is empty for key '{record.key}'"
+            assert not record.is_external
+
+
+def test_manifest_round_trip_v3(manifest_fname):
+    """Fields are preserved across close/reopen for both regular and external records."""
+    with DataManifest(manifest_fname) as dm:
+        eight_record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{eight_record.remote_uri.bucket}/{eight_record.remote_uri.path}"
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add_external("ext/round_trip.txt", base_uri, notes="round trip test")
+        ext_record_before = manifest.get("ext/round_trip.txt", validate=False)
+
+    with DataManifest(manifest_fname) as dm:
+        eight_after = dm.get("eight_As.txt", validate=False)
+        assert eight_after.md5sum == eight_record.md5sum
+        assert eight_after.s3_hash == eight_record.s3_hash
+        assert eight_after.size == eight_record.size
+        assert eight_after.is_external is False
+
+        ext_after = dm.get("ext/round_trip.txt", validate=False)
+        assert ext_after.is_external is True
+        assert ext_after.source_uri == ext_record_before.source_uri
+        assert ext_after.s3_hash == ext_record_before.s3_hash
+        assert ext_after.size == ext_record_before.size
+        assert ext_after.notes == "round trip test"
+
+
+def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
+    """Opening a v2 manifest with DataManifestWriter and adding a file upgrades it to v3."""
+    manifest_fname = os.path.join(cleandir, "upgrade_test.data_manifest.tsv")
+    local_cache_prefix = os.path.normpath(os.path.join(cleandir, "./local_cache"))
+    os.makedirs(local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS)
+    os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
+
+    checkout_prefix = os.path.normpath(os.path.join(cleandir, "./checkout"))
+
+    if S3_TEST_BASE_PATH:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{S3_TEST_BASE_PATH}/{GIT_HASH}-{random_string(16)}"
+    else:
+        remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+
+    # Create a v3 manifest with one file, then downgrade it to v2 format on disk
+    first_file = os.path.join(cleandir, "first.txt")
+    with open(first_file, "w") as fp:
+        fp.write("first file content")
+
+    with DataManifestWriter.new(
+        manifest_fname,
+        remote_datastore_uri,
+        checkout_prefix=checkout_prefix,
+        local_cache_prefix=local_cache_prefix,
+    ) as manifest:
+        manifest.add("first.txt", first_file)
+        v3_record = manifest.get("first.txt", validate=False)
+
+    # Manually rewrite the TSV to v2 format (5 columns, MANIFEST_VERSION=2)
+    with open(manifest_fname, "r") as fp:
+        content = fp.read()
+
+    v2_lines = []
+    for line in content.splitlines():
+        if line.startswith("#MANIFEST_VERSION="):
+            v2_lines.append("#MANIFEST_VERSION=2")
+        elif line.startswith("key\t"):
+            # Replace v3 header with v2 header (5 columns)
+            v2_lines.append("key\ts3_version_id\tmd5sum\tsize\tnotes")
+        elif line and not line.startswith("#"):
+            # Data row: key, s3_version_id, md5sum, s3_hash, size, source_uri, notes
+            # v2 format: key, s3_version_id, md5sum, size, notes
+            parts = line.split("\t")
+            key, s3_version_id, md5sum, s3_hash, size, source_uri, notes = (
+                parts + [""] * (7 - len(parts))
+            )[:7]
+            v2_lines.append("\t".join([key, s3_version_id, md5sum, size, notes]))
+        else:
+            v2_lines.append(line)
+
+    with open(manifest_fname, "w") as fp:
+        fp.write("\n".join(v2_lines) + "\n")
+
+    # Also update local config to use version 2
+    local_config_path = manifest_fname + ".local_config"
+    with open(local_config_path, "r") as fp:
+        lc_content = fp.read()
+    with open(local_config_path, "w") as fp:
+        fp.write(lc_content.replace("MANIFEST_VERSION=3", "MANIFEST_VERSION=2"))
+
+    # Add a second file via DataManifestWriter — this should upgrade to v3
+    second_file = os.path.join(cleandir, "second.txt")
+    with open(second_file, "w") as fp:
+        fp.write("second file content")
+
+    with DataManifestWriter(manifest_fname) as manifest:
+        manifest.add("second.txt", second_file)
+
+    # Verify the manifest is now v3: MANIFEST_VERSION=3 in header, 7-column data rows
+    with open(manifest_fname, "r") as fp:
+        lines = fp.readlines()
+
+    version_line = next(l for l in lines if l.startswith("#MANIFEST_VERSION="))
+    assert version_line.strip() == "#MANIFEST_VERSION=3"
+
+    header_line = next(l for l in lines if not l.startswith("#") and l.strip())
+    assert header_line.strip() == "key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes"
+
+    # Clean up S3 objects
+    s3 = boto3.resource("s3")
+    parsed = urlparse(remote_datastore_uri)
+    bucket = s3.Bucket(parsed.netloc)
+    bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()

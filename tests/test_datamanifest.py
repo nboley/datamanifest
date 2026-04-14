@@ -64,8 +64,8 @@ def _find_current_git_branch():
     return rv
 
 
-S3_TEST_BUCKET = "nboley-test-data-manifest"
-S3_TEST_BASE_PATH = ""
+S3_TEST_BUCKET = "karius-biomarker-data-assets"
+S3_TEST_BASE_PATH = "test/datamanifest"
 GIT_HASH = _find_current_git_hash()
 GIT_BRANCH = _find_current_git_branch()
 

@@ -23,7 +23,8 @@ conda-login:
 	if [ -n "$$JFROG_URL" ] && { [ -n "$$JFROG_USER" ] || [ -n "$$JFROG_ACCESS_TOKEN" ]; }; then \
 		HAS_ENV_CREDS=1; \
 	fi; \
-	if [ -f ~/.config/pip/pip.conf ] && grep -q "index-url.*jfrog" ~/.config/pip/pip.conf 2>/dev/null; then \
+	if ([ -f ~/.config/pip/pip.conf ] && grep -q "index-url.*jfrog" ~/.config/pip/pip.conf 2>/dev/null) || \
+		([ -f ~/.pip/pip.conf ] && grep -q "index-url.*jfrog" ~/.pip/pip.conf 2>/dev/null); then \
 		HAS_PIP_CREDS=1; \
 	fi; \
 	if [ $$HAS_ENV_CREDS -eq 0 ] && [ $$HAS_PIP_CREDS -eq 0 ]; then \

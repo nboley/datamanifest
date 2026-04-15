@@ -194,8 +194,10 @@ class RemotePath:
     def from_uri(cls, uri, skip_validation=False):
         parsed_uri = urlparse(uri)
         if not skip_validation:
-            assert parsed_uri.params == ""
-            assert parsed_uri.fragment == ""
+            if parsed_uri.params:
+                raise ValueError(f"Unexpected params in URI: {uri}")
+            if parsed_uri.fragment:
+                raise ValueError(f"Unexpected fragment in URI: {uri}")
         version_id = ""
         if parsed_uri.query:
             query_params = parse_qs(parsed_uri.query)
@@ -466,6 +468,11 @@ class DataManifest:
 
     @staticmethod
     def _build_datastore_suffix(key, file_hash):
+        if not file_hash:
+            raise ValueError(
+                f"Cannot build cache path for key '{key}': no file hash available "
+                "(both s3_hash and md5sum are empty)"
+            )
         return os.path.join(
             os.path.dirname(key), f"./{file_hash}-" + os.path.basename(key)
         )
@@ -1162,7 +1169,7 @@ class DataManifestWriter(DataManifest):
         """Add an external S3 object to the manifest without downloading it."""
         validate_key(key)
         if key in self._data:
-            raise ValueError(f"Key '{key}' already exists. Delete first to re-add.")
+            raise KeyAlreadyExistsError(f"Key '{key}' already exists. Delete first to re-add.")
 
         metadata = self._get_s3_object_metadata(s3_uri)
         etag = metadata["etag"]

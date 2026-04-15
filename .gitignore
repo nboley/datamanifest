@@ -113,3 +113,9 @@ venv.bak/
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Conda/Rattler build artifacts
+output/
+work/
+*.conda
+*.tar.bz2

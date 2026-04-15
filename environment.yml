@@ -1,0 +1,9 @@
+name: datamanifest
+channels:
+  - conda-forge
+dependencies:
+  - python >=3.6
+  - boto3
+  - lockfile
+  - tqdm
+  - pip

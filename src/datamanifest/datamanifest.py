@@ -357,7 +357,26 @@ class DataManifest:
             self._data[key], local_abs_path, check_md5sum=check_md5sum
         )
 
-    def _update_local_cache(self, key, fast=False, retries=3):
+    def _check_remote_etag(self, key):
+        """For unversioned external records, verify the remote ETag hasn't changed.
+
+        Versioned references (non-empty s3_version_id) are pinned to a specific
+        object version, so the check is skipped for them.
+        """
+        record = self._data[key]
+        if not record.is_external:
+            return
+        if record.s3_version_id:
+            return
+        current_metadata = self._get_s3_object_metadata(record.remote_uri.uri)
+        if current_metadata["etag"] != record.s3_hash:
+            raise FileMismatchError(
+                f"Remote ETag for external record '{key}' has changed: "
+                f"expected '{record.s3_hash}', got '{current_metadata['etag']}'. "
+                f"The upstream file may have been replaced."
+            )
+
+    def _update_local_cache(self, key, fast=False, retries=3, skip_remote_check=False):
         """Download key from the remote location to the local location."""
         # if the file already exists in the local cache, then verify it is the
         # same as the remote file
@@ -392,6 +411,10 @@ class DataManifest:
 
         lock = lockfile.LockFile(local_cache_path + ".lock")
         with lock:
+            # For unversioned external records, verify the remote hasn't been replaced
+            if not skip_remote_check:
+                self._check_remote_etag(key)
+
             # if local_path already exists, then make sure that it matches the remote file
             if os.path.exists(local_cache_path):
                 logger.debug(
@@ -838,8 +861,8 @@ class DataManifest:
     def values(self):
         return self._data.values()
 
-    def sync_and_get(self, key, fast=True) -> DataManifestRecord:
-        self.sync_record(key, fast=fast)
+    def sync_and_get(self, key, fast=True, skip_remote_check=False) -> DataManifestRecord:
+        self.sync_record(key, fast=fast, skip_remote_check=skip_remote_check)
         return self.get(key, validate=False)  # validate was done in the sync
 
     def get(self, key, validate=True) -> DataManifestRecord:
@@ -850,7 +873,7 @@ class DataManifest:
     def __iter__(self):
         return iter(self.values())
 
-    def sync_record(self, key, fast=False):
+    def sync_record(self, key, fast=False, skip_remote_check=False):
         logger.debug(f"Syncing '{key}'")
         # if the file doesn't exist, then add it
         path = self._data[key].path
@@ -858,22 +881,26 @@ class DataManifest:
         lock = lockfile.LockFile(path + ".sync.lock")
         with lock:
             if not os.path.exists(path):
-                self._update_local_cache(key, fast=fast)
+                self._update_local_cache(key, fast=fast, skip_remote_check=skip_remote_check)
                 self._update_local_checkout(key)
-            # if it does exit, verify that it matches the manifest
+            # if it does exist, verify that it matches the manifest
             else:
+                # For already-synced external records, still check remote ETag for drift
+                if not skip_remote_check:
+                    self._check_remote_etag(key)
                 self.validate_record(key, check_md5sum=(not fast))
         return self._data[key]
 
-    def sync(self, fast=False, progress_bar=False):
+    def sync(self, fast=False, progress_bar=False, skip_remote_check=False):
         """Sync the data manifest.
 
         If fast is set to True, then skip the md5sum check.
+        If skip_remote_check is True, skip the remote ETag verification for external records.
         """
         assert fast in [True, False]
 
         for key in tqdm(self.keys(), disable=not progress_bar):
-            self.sync_record(key, fast=fast)
+            self.sync_record(key, fast=fast, skip_remote_check=skip_remote_check)
 
     def validate(self, fast=False):
         for key in self.keys():
@@ -905,6 +932,22 @@ class DataManifestWriter(DataManifest):
             raise RuntimeError(
                 f"'{self.fname}' has been opened by another process, and so it can't be opened for writing"
             )
+
+    def sync_record(self, key, fast=False, skip_remote_check=False):
+        """Sync a record with md5sum backfill for external records.
+
+        After downloading an external file with empty md5sum, computes the
+        content MD5 from the local file and persists it in the manifest.
+        """
+        record = super().sync_record(key, fast=fast, skip_remote_check=skip_remote_check)
+        if record.is_external and not record.md5sum:
+            local_cache_path = self.get_local_cache_path(key)
+            if os.path.exists(local_cache_path):
+                computed_md5 = calc_md5sum_from_fname(local_cache_path)
+                self._data[key] = dataclasses.replace(record, md5sum=computed_md5)
+                self._save_to_disk()
+                logger.info(f"Backfilled md5sum '{computed_md5}' for external record '{key}'")
+        return self._data[key]
 
     @classmethod
     def new(

@@ -1726,3 +1726,402 @@ def test_read_records_empty_version_id_external(cleandir):
 
     with pytest.raises(ValueError, match="s3_version_id is required"):
         DataManifest(manifest_path)
+
+
+# ---- Section 14: Remote ETag check and md5sum backfill ----
+
+
+def _rewrite_manifest_record(manifest_path, key, version_id="", s3_hash=None):
+    """Helper to hand-craft a manifest record's version_id and s3_hash fields.
+
+    Used to simulate unversioned external references on a versioned test bucket.
+    """
+    with open(manifest_path) as f:
+        lines = f.readlines()
+    with open(manifest_path, "w") as f:
+        for line in lines:
+            if line.startswith(f"{key}\t"):
+                parts = line.rstrip("\n").split("\t")
+                parts[1] = version_id
+                if s3_hash is not None:
+                    parts[3] = s3_hash
+                f.write("\t".join(parts) + "\n")
+            else:
+                f.write(line)
+
+
+def test_etag_check_passes_on_unchanged_external(manifest_fname):
+    """ETag check passes when remote file hasn't changed since add-s3.
+
+    Since the test bucket has versioning, add_external captures a version_id
+    which causes _check_remote_etag to skip. We clear version_id (keeping
+    the correct s3_hash) to exercise the actual ETag comparison path.
+    """
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        base_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}"
+        manifest_path = dm.fname
+
+    with DataManifestWriter(manifest_fname) as writer:
+        writer.add_external("ext/etag_unchanged.txt", base_uri)
+
+    # Clear version_id so the ETag comparison actually runs
+    _rewrite_manifest_record(manifest_path, "ext/etag_unchanged.txt", version_id="")
+
+    # sync with ETag check enabled — should succeed since s3_hash matches current ETag
+    with DataManifest(manifest_path) as dm:
+        dm.sync_record("ext/etag_unchanged.txt", skip_remote_check=False)
+
+
+def test_etag_check_detects_replaced_file(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """ETag check raises FileMismatchError when remote ETag doesn't match stored s3_hash.
+
+    Since our test bucket has versioning, add_external always captures a version_id
+    (which skips the ETag check). To test the unversioned path, we hand-craft a
+    manifest record with empty version_id but pointing at a real S3 object.
+    """
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+        manifest_path = dm.fname
+
+    # Upload a file so we have a real S3 object to point at
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/replaceable.txt"
+    test_file = os.path.join(cleandir2, "replaceable.txt")
+    with open(test_file, "w") as f:
+        f.write("original content")
+    s3_client.upload_file(test_file, bucket_name, ext_key)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        # Add via writer (which captures version_id), then rewrite the manifest
+        # to clear the version_id — simulating an unversioned external reference
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/replaceable.txt", ext_uri)
+
+        # Rewrite the manifest line to have empty version_id and a stale s3_hash
+        _rewrite_manifest_record(
+            manifest_path, "ext/replaceable.txt",
+            version_id="", s3_hash="stale_etag_from_before_replacement",
+        )
+
+        # Now the record has empty version_id + wrong s3_hash pointing at real S3 object
+        with DataManifest(manifest_path) as dm:
+            with pytest.raises(FileMismatchError, match="Remote ETag.*has changed"):
+                dm.sync_record("ext/replaceable.txt", skip_remote_check=False)
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_etag_check_skipped_for_versioned_external(manifest_fname, check_s3_bucket_versioning):
+    """Versioned external records skip the ETag check (version ID pins the object)."""
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        # Use a versioned URI — the existing eight_As.txt has a version ID
+        versioned_uri = f"s3://{record.remote_uri.bucket}/{record.remote_uri.path}?versionId={record.s3_version_id}"
+
+    with DataManifestWriter(manifest_fname) as writer:
+        writer.add_external("ext/versioned_etag.txt", versioned_uri)
+        ext_record = writer.get("ext/versioned_etag.txt", validate=False)
+        assert ext_record.s3_version_id != ""
+
+    # sync with ETag check enabled — should not make a head_object call for versioned records
+    with DataManifest(manifest_fname) as dm:
+        dm.sync_record("ext/versioned_etag.txt", skip_remote_check=False)
+
+
+def test_etag_check_skipped_for_regular_records(manifest_fname):
+    """Regular (non-external) records are not subject to ETag checks."""
+    # Regular records already synced by manifest_fname fixture. Just verify
+    # that sync_record with skip_remote_check=False works for them.
+    with DataManifest(manifest_fname) as dm:
+        dm.sync_record("eight_As.txt", skip_remote_check=False)
+
+
+def test_skip_remote_check_flag_bypasses_etag(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """skip_remote_check=True allows sync even when s3_hash is stale."""
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+        manifest_path = dm.fname
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/skip_check.txt"
+    test_file = os.path.join(cleandir2, "skip_check.txt")
+    with open(test_file, "w") as f:
+        f.write("skip check content")
+    s3_client.upload_file(test_file, bucket_name, ext_key)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/skip_check.txt", ext_uri)
+
+        # Rewrite to simulate unversioned external with wrong ETag
+        _rewrite_manifest_record(
+            manifest_path, "ext/skip_check.txt",
+            version_id="", s3_hash="wrong_etag",
+        )
+
+        # Without skip_remote_check, this would fail
+        with DataManifest(manifest_path) as dm:
+            with pytest.raises(FileMismatchError, match="Remote ETag.*has changed"):
+                dm.sync_record("ext/skip_check.txt", skip_remote_check=False)
+
+        # With skip_remote_check=True, sync should succeed
+        with DataManifest(manifest_path) as dm:
+            dm.sync_record("ext/skip_check.txt", skip_remote_check=True)
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_etag_check_on_resync_cached(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """ETag check catches stale s3_hash even when file is already cached locally."""
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+        manifest_path = dm.fname
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/cached_drift.txt"
+    test_file = os.path.join(cleandir2, "cached_drift.txt")
+    with open(test_file, "w") as f:
+        f.write("cached content")
+    s3_client.upload_file(test_file, bucket_name, ext_key)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/cached_drift.txt", ext_uri)
+
+        # First sync with skip_remote_check — downloads and caches the file
+        with DataManifest(manifest_fname) as dm:
+            dm.sync_record("ext/cached_drift.txt", skip_remote_check=True)
+
+        # Now tamper with the manifest: clear version_id and set wrong s3_hash
+        # This simulates an unversioned reference where upstream drifted
+        _rewrite_manifest_record(
+            manifest_path, "ext/cached_drift.txt",
+            version_id="", s3_hash="drifted_etag",
+        )
+
+        # Re-sync with ETag check — should catch the mismatch even though file is cached
+        with DataManifest(manifest_path) as dm:
+            with pytest.raises(FileMismatchError, match="Remote ETag.*has changed"):
+                dm.sync_record("ext/cached_drift.txt", skip_remote_check=False)
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_md5sum_backfill_on_writer_sync(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """DataManifestWriter.sync_record backfills md5sum for external records with empty md5sum.
+
+    Uses multipart upload to produce a multipart ETag (not a plain MD5), which
+    causes add_external to leave md5sum empty — the backfill path then fills it.
+    """
+    import boto3.s3.transfer
+
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/backfill_test.bin"
+    # File must be larger than multipart_chunksize to actually produce a multipart upload
+    test_content = b"B" * (6 * 1024 * 1024)  # 6 MB
+    test_file = os.path.join(cleandir2, "backfill_test.bin")
+    with open(test_file, "wb") as f:
+        f.write(test_content)
+
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=1, multipart_chunksize=5 * 1024 * 1024,
+    )
+    s3_client.upload_file(test_file, bucket_name, ext_key, Config=transfer_config)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        # Add external reference — md5sum will be empty due to multipart ETag
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/backfill.bin", ext_uri)
+            record = writer.get("ext/backfill.bin", validate=False)
+            assert record.md5sum == ""
+
+        # Sync via writer — should backfill md5sum
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.sync(skip_remote_check=True)
+            record = writer.get("ext/backfill.bin", validate=False)
+            assert record.md5sum != "", "md5sum should be backfilled after writer sync"
+
+        # Verify the backfill was persisted by re-reading from disk
+        with DataManifest(manifest_fname) as dm:
+            record = dm.get("ext/backfill.bin", validate=False)
+            assert record.md5sum != "", "md5sum should be persisted in manifest file"
+            # Verify it matches the actual content
+            expected_md5 = calc_md5sum_from_fname(test_file)
+            assert record.md5sum == expected_md5
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_md5sum_backfill_idempotent(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """Second writer sync does not recompute md5sum — it's already populated."""
+    import boto3.s3.transfer
+
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/idempotent_test.bin"
+    test_content = b"I" * (6 * 1024 * 1024)  # 6 MB to force multipart
+    test_file = os.path.join(cleandir2, "idempotent_test.bin")
+    with open(test_file, "wb") as f:
+        f.write(test_content)
+
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=1, multipart_chunksize=5 * 1024 * 1024,
+    )
+    s3_client.upload_file(test_file, bucket_name, ext_key, Config=transfer_config)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/idempotent.bin", ext_uri)
+
+        # First sync — backfill
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.sync(skip_remote_check=True)
+            md5_after_first = writer.get("ext/idempotent.bin", validate=False).md5sum
+            assert md5_after_first != ""
+
+        # Second sync — md5sum already populated, verify value is preserved
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.sync_record("ext/idempotent.bin", skip_remote_check=True)
+            md5_after_second = writer.get("ext/idempotent.bin", validate=False).md5sum
+            assert md5_after_second == md5_after_first
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_reader_sync_does_not_backfill(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """DataManifest (reader) sync does NOT backfill md5sum — only the writer does."""
+    import boto3.s3.transfer
+
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/no_backfill.bin"
+    test_content = b"N" * (6 * 1024 * 1024)  # 6 MB to force multipart
+    test_file = os.path.join(cleandir2, "no_backfill.bin")
+    with open(test_file, "wb") as f:
+        f.write(test_content)
+
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=1, multipart_chunksize=5 * 1024 * 1024,
+    )
+    s3_client.upload_file(test_file, bucket_name, ext_key, Config=transfer_config)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/no_backfill.bin", ext_uri)
+
+        # Sync via reader — should NOT backfill
+        with DataManifest(manifest_fname) as dm:
+            dm.sync(skip_remote_check=True)
+            record = dm.get("ext/no_backfill.bin", validate=False)
+            assert record.md5sum == "", "Reader sync should not backfill md5sum"
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_md5sum_backfill_enables_full_validate(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """After md5sum backfill, validate with check_md5sum=True works for external records."""
+    import boto3.s3.transfer
+
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/validate_after_backfill.bin"
+    test_content = b"V" * (6 * 1024 * 1024)  # 6 MB to force multipart
+    test_file = os.path.join(cleandir2, "validate_after_backfill.bin")
+    with open(test_file, "wb") as f:
+        f.write(test_content)
+
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=1, multipart_chunksize=5 * 1024 * 1024,
+    )
+    s3_client.upload_file(test_file, bucket_name, ext_key, Config=transfer_config)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/validate_backfill.bin", ext_uri)
+
+        # Sync via writer to trigger backfill
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.sync(skip_remote_check=True)
+
+        # Now validate with check_md5sum=True — should pass because md5sum was backfilled
+        with DataManifest(manifest_fname) as dm:
+            record = dm.get("ext/validate_backfill.bin", validate=False)
+            assert record.md5sum != "", "md5sum should have been backfilled"
+            dm.validate_record("ext/validate_backfill.bin", check_md5sum=True)
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_sync_main_auto_upgrade_to_writer(manifest_fname, cleandir2, check_s3_bucket_versioning):
+    """sync_main opens a writer (and backfills md5sum) when external records need it."""
+    import boto3.s3.transfer
+    from datamanifest.main import sync_main
+
+    s3_client = boto3.client("s3")
+    with DataManifest(manifest_fname) as dm:
+        record = dm.get("eight_As.txt", validate=False)
+        bucket_name = record.remote_uri.bucket
+
+    ext_key = f"test/datamanifest/{GIT_HASH}-{random_string(16)}/sync_main_test.bin"
+    test_content = b"S" * (6 * 1024 * 1024)  # 6 MB to force multipart
+    test_file = os.path.join(cleandir2, "sync_main_test.bin")
+    with open(test_file, "wb") as f:
+        f.write(test_content)
+    transfer_config = boto3.s3.transfer.TransferConfig(
+        multipart_threshold=1, multipart_chunksize=5 * 1024 * 1024,
+    )
+    s3_client.upload_file(test_file, bucket_name, ext_key, Config=transfer_config)
+    ext_uri = f"s3://{bucket_name}/{ext_key}"
+
+    try:
+        # Add external record — md5sum will be empty
+        with DataManifestWriter(manifest_fname) as writer:
+            writer.add_external("ext/sync_main.bin", ext_uri)
+
+        with DataManifest(manifest_fname) as dm:
+            record = dm.get("ext/sync_main.bin", validate=False)
+            assert record.md5sum == "", "md5sum should be empty before sync_main"
+
+        # sync_main should detect empty md5sum, open writer, and backfill
+        sync_main(manifest_fname, fast=True, progress_bar=False, skip_remote_check=True)
+
+        # Verify md5sum was backfilled
+        with DataManifest(manifest_fname) as dm:
+            record = dm.get("ext/sync_main.bin", validate=False)
+            assert record.md5sum != "", "sync_main should have backfilled md5sum"
+            expected_md5 = calc_md5sum_from_fname(test_file)
+            assert record.md5sum == expected_md5
+    finally:
+        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+
+
+def test_sync_main_uses_reader_when_no_backfill_needed(manifest_fname):
+    """sync_main opens only a reader when no external records need md5sum backfill."""
+    from datamanifest.main import sync_main
+
+    # All regular records already have md5sum — sync_main should use reader (no lock upgrade)
+    sync_main(manifest_fname, fast=True, progress_bar=False, skip_remote_check=True)

@@ -121,9 +121,24 @@ def add_s3_main(manifest_fname, key, s3_uri, notes=""):
     dm.add_external(key, s3_uri, notes=notes)
 
 
-def sync_main(manifest_fname, fast, progress_bar=True):
-    dm = DataManifest(manifest_fname)
-    dm.sync(fast=fast, progress_bar=progress_bar)
+def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
+    # Check if any external records need md5sum backfill — requires writer access.
+    # Note: there is a small TOCTOU window between this check and opening the
+    # writer/reader below. If a concurrent process adds an external record with
+    # empty md5sum in that window, we may open a reader and skip backfill — the
+    # next sync will catch it.
+    with DataManifest(manifest_fname) as dm_reader:
+        needs_writer = any(
+            record.is_external and not record.md5sum
+            for record in dm_reader.values()
+        )
+
+    if needs_writer:
+        dm = DataManifestWriter(manifest_fname)
+    else:
+        dm = DataManifest(manifest_fname)
+    with dm:
+        dm.sync(fast=fast, progress_bar=progress_bar, skip_remote_check=skip_remote_check)
 
 
 def checkout_main(manifest_fname, checkout_dir, sync=False, fast=False, progress_bar=True):
@@ -166,6 +181,10 @@ def parse_args():
     sync_subparser = subparsers.add_parser("sync", help="sync an existing data directory from a manifest")
     sync_subparser.add_argument("manifest-path", help="Path to data manifest.")
     sync_subparser.add_argument("--fast", default=False, action="store_true", help="skip the md5sum check")
+    sync_subparser.add_argument(
+        "--skip-remote-check", default=False, action="store_true",
+        help="skip the remote ETag verification for external records"
+    )
 
     add_subparser = subparsers.add_parser("add", help="add a file to a manifest")
     update_subparser = subparsers.add_parser("update", help="update a record in the manifest")
@@ -239,6 +258,7 @@ def main():
     elif args.command == "sync":
         sync_main(
             getattr(args, 'manifest-path'), args.fast, progress_bar=(not args.quiet),
+            skip_remote_check=args.skip_remote_check,
         )
     elif args.command == "add":
         add_main(getattr(args, 'manifest-path'), args.key, args.path, args.notes)

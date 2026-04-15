@@ -168,6 +168,14 @@ def validate_key(key):
         raise InvalidKey(f"{key} must be a relative path")
 
 
+def _validate_tsv_safe(value, field_name):
+    """Reject values containing characters that would corrupt TSV format."""
+    if '\t' in value or '\n' in value or '\r' in value:
+        raise ValueError(
+            f"{field_name} contains characters that would corrupt the TSV format: {value!r}"
+        )
+
+
 def validate_local_prefix(prefix):
     _validate_prefix(prefix, InvalidPrefix)
 
@@ -276,6 +284,7 @@ class DataManifest:
         }
 
     def _build_new_data_manifest_record(self, key, fname_to_add, notes):
+        _validate_tsv_safe(notes, "notes")
         # find the file's file size and calculate the checksum
         logger.info(f"Calculating md5sum for '{fname_to_add}'")
         md5sum = calc_md5sum_from_fname(fname_to_add)
@@ -1211,8 +1220,9 @@ class DataManifestWriter(DataManifest):
     def add_external(self, key, s3_uri, notes=""):
         """Add an external S3 object to the manifest without downloading it."""
         validate_key(key)
+        _validate_tsv_safe(notes, "notes")
         if key in self._data:
-            raise KeyAlreadyExistsError(f"Key '{key}' already exists. Delete first to re-add.")
+            raise KeyAlreadyExistsError(f"Key '{key}' already exists in '{self.fname}'. Delete first to re-add.")
 
         metadata = self._get_s3_object_metadata(s3_uri)
         etag = metadata["etag"]
@@ -1230,10 +1240,7 @@ class DataManifestWriter(DataManifest):
         parsed = RemotePath.from_uri(s3_uri, skip_validation=True)
         source_uri = f"s3://{parsed.bucket}/{parsed.path}"
 
-        if '\t' in source_uri or '\n' in source_uri or '\r' in source_uri:
-            raise ValueError(
-                f"source_uri contains characters that would corrupt the TSV format: {source_uri!r}"
-            )
+        _validate_tsv_safe(source_uri, "source_uri")
 
         remote_uri = RemotePath.from_uri(source_uri, skip_validation=True)
         if version_id:

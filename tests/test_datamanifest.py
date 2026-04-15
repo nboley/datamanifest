@@ -1327,6 +1327,18 @@ def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
         cols = data_line.rstrip("\n").split("\t")
         assert len(cols) == 7, f"Expected 7 columns, got {len(cols)}: {data_line.rstrip()}"
 
+    # Verify the original v2 record has empty s3_hash and source_uri after upgrade
+    first_record_line = [l for l in data_lines if l.startswith("first.txt")][0]
+    first_cols = first_record_line.strip().split("\t")
+    assert first_cols[3] == "", f"Expected empty s3_hash for upgraded v2 record, got '{first_cols[3]}'"
+    assert first_cols[5] == "", f"Expected empty source_uri for upgraded v2 record, got '{first_cols[5]}'"
+
+    # Verify the new record has populated s3_hash
+    second_record_line = [l for l in data_lines if l.startswith("second.txt")][0]
+    second_cols = second_record_line.strip().split("\t")
+    assert second_cols[3] != "", f"Expected non-empty s3_hash for new v3 record"
+    assert second_cols[5] == "", f"Expected empty source_uri for regular record, got '{second_cols[5]}'"
+
     # Reopen and verify records parse correctly with proper field values
     with DataManifest(manifest_fname) as dm:
         first_rec = dm.get("first.txt", validate=False)
@@ -2125,3 +2137,49 @@ def test_sync_main_uses_reader_when_no_backfill_needed(manifest_fname):
 
     # All regular records already have md5sum — sync_main should use reader (no lock upgrade)
     sync_main(manifest_fname, fast=True, progress_bar=False, skip_remote_check=True)
+
+
+def test_notes_validation_rejects_tabs():
+    """Notes containing tab or newline characters should be rejected."""
+    from datamanifest.datamanifest import _validate_tsv_safe
+    with pytest.raises(ValueError, match="TSV format"):
+        _validate_tsv_safe("has\ttab", "notes")
+    with pytest.raises(ValueError, match="TSV format"):
+        _validate_tsv_safe("has\nnewline", "notes")
+    with pytest.raises(ValueError, match="TSV format"):
+        _validate_tsv_safe("has\rcarriage", "notes")
+    # Clean string should pass
+    _validate_tsv_safe("clean notes string", "notes")
+
+
+def test_get_local_cache_path_rejects_empty_hashes(cleandir):
+    """get_local_cache_path raises ValueError when both s3_hash and md5sum are empty."""
+    manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://bucket/path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes\n")
+        f.write("ext.txt\tv1\t\t\t50\ts3://other/file.txt\t\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={cleandir}/checkout\n")
+        f.write(f"LOCAL_CACHE_PREFIX={cleandir}/cache\n")
+
+    dm = DataManifest(manifest_path)
+    with pytest.raises(ValueError, match="both s3_hash and md5sum are empty"):
+        dm.get_local_cache_path("ext.txt")
+    dm.close()
+
+
+def test_remote_path_from_uri_rejects_params():
+    """from_uri raises ValueError (not AssertionError) for URIs with params."""
+    with pytest.raises(ValueError, match="Unexpected params"):
+        RemotePath.from_uri("s3://bucket/path;params")
+
+
+def test_remote_path_from_uri_rejects_fragment():
+    """from_uri raises ValueError (not AssertionError) for URIs with fragment."""
+    with pytest.raises(ValueError, match="Unexpected fragment"):
+        RemotePath.from_uri("s3://bucket/path#fragment")

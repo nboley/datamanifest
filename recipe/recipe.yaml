@@ -27,9 +27,9 @@ requirements:
     - tqdm
 
 tests:
-  python:
-    imports:
-      - datamanifest
+  - python:
+      imports:
+        - datamanifest
 
 about:
   homepage: https://github.com/nboley/datamanifest

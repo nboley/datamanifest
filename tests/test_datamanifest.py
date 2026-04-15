@@ -2183,3 +2183,9 @@ def test_remote_path_from_uri_rejects_fragment():
     """from_uri raises ValueError (not AssertionError) for URIs with fragment."""
     with pytest.raises(ValueError, match="Unexpected fragment"):
         RemotePath.from_uri("s3://bucket/path#fragment")
+
+
+def test_build_datastore_suffix_rejects_empty_hash():
+    """_build_datastore_suffix raises ValueError when file_hash is empty."""
+    with pytest.raises(ValueError, match="no file hash available"):
+        DataManifest._build_datastore_suffix("some/key.txt", "")

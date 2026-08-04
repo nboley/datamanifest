@@ -137,6 +137,45 @@ def s3_uri_exists(remote_path):
         return True
 
 
+def _purge_versions(bucket_name, prefix):
+    """Delete every object version and delete marker under a prefix.
+
+    The test bucket has versioning enabled (DataManifest requires it), so
+    .objects.filter().delete() and client.delete_object() are not enough: they
+    only remove the *current* version of a key, leaving every noncurrent
+    version behind and adding a delete marker on top. That residue is
+    invisible to `aws s3 ls` and grows without bound across runs.
+    .object_versions covers versions and delete markers both.
+    """
+    bucket = boto3.resource("s3").Bucket(bucket_name)
+    bucket.object_versions.filter(Prefix=prefix).delete()
+
+
+def purge_s3_prefix(uri):
+    """Delete everything under a test datastore URI, including old versions."""
+    parsed = urlparse(uri)
+    _purge_versions(parsed.netloc, parsed.path.lstrip("/"))
+
+
+def purge_s3_key(bucket_name, key):
+    """Delete a single object and all of its versions."""
+    _purge_versions(bucket_name, key)
+
+
+@pytest.fixture()
+def s3_cleanup():
+    """Register test datastore URIs to purge once the test finishes.
+
+    Cleanup written inline at the end of a test body is skipped when the test
+    fails, which is exactly when it is needed. Registering here runs it either
+    way.
+    """
+    uris = []
+    yield uris.append
+    for uri in uris:
+        purge_s3_prefix(uri)
+
+
 @pytest.fixture()
 def manifest_fname(cleandir, check_s3_bucket_versioning):
     """Instantiate a data manifest with files."""
@@ -189,13 +228,10 @@ def manifest_fname(cleandir, check_s3_bucket_versioning):
         yield manifest.fname  # provide the fixture value
 
     # clean up S3 files created in remote_datastore_uri
-    s3 = boto3.resource("s3")
-    parsed = urlparse(remote_datastore_uri)
-    bucket = s3.Bucket(parsed.netloc)
-    bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()
+    purge_s3_prefix(remote_datastore_uri)
 
 
-def test_new_dm_on_class_init(cleandir, check_s3_bucket_versioning):
+def test_new_dm_on_class_init(cleandir, check_s3_bucket_versioning, s3_cleanup):
     new_dm_path = f"{cleandir}/test_dm.data_manifest.tsv"
     assert not os.path.exists(
         new_dm_path
@@ -211,6 +247,7 @@ def test_new_dm_on_class_init(cleandir, check_s3_bucket_versioning):
         remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{S3_TEST_BASE_PATH}/{GIT_HASH}-{random_string(16)}"
     else:
         remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    s3_cleanup(remote_datastore_uri)
 
     with DataManifestWriter.new(
         new_dm_path,
@@ -1243,7 +1280,7 @@ def test_manifest_round_trip_v3(manifest_fname):
         assert ext_after.notes == "round trip test"
 
 
-def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
+def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning, s3_cleanup):
     """Opening a v2 manifest with DataManifestWriter and adding a file upgrades it to v3."""
     manifest_fname = os.path.join(cleandir, "upgrade_test.data_manifest.tsv")
     local_cache_prefix = os.path.normpath(os.path.join(cleandir, "./local_cache"))
@@ -1256,6 +1293,7 @@ def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
         remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{S3_TEST_BASE_PATH}/{GIT_HASH}-{random_string(16)}"
     else:
         remote_datastore_uri = f"s3://{S3_TEST_BUCKET}/{GIT_HASH}-{random_string(16)}"
+    s3_cleanup(remote_datastore_uri)
 
     # Create a v3 manifest with one file, then downgrade it to v2 format on disk
     first_file = os.path.join(cleandir, "first.txt")
@@ -1353,11 +1391,6 @@ def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
         assert second_rec.source_uri == ""
         assert second_rec.is_external is False
 
-    # Clean up S3 objects
-    s3 = boto3.resource("s3")
-    parsed = urlparse(remote_datastore_uri)
-    bucket = s3.Bucket(parsed.netloc)
-    bucket.objects.filter(Prefix=parsed.path.lstrip("/")).delete()
 
 
 # =============================================================================
@@ -1417,7 +1450,7 @@ def test_add_external_sync_multipart(manifest_fname, cleandir2, check_s3_bucket_
             with open(synced.path, "rb") as f:
                 assert f.read() == test_content
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=multipart_key)
+        purge_s3_key(bucket_name, multipart_key)
 
 
 def test_add_external_resync_multipart(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -1449,7 +1482,7 @@ def test_add_external_resync_multipart(manifest_fname, cleandir2, check_s3_bucke
             dm.sync(fast=True)  # first sync
             dm.sync(fast=False)  # re-sync with full validation — must not raise
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=multipart_key)
+        purge_s3_key(bucket_name, multipart_key)
 
 
 def test_add_external_validate_pre_sync(manifest_fname):
@@ -1511,7 +1544,7 @@ def test_add_external_validate_post_sync_multipart(manifest_fname, cleandir2, ch
             dm.sync()
             dm.validate_record("ext/validate_mp.bin", check_md5sum=True)  # should pass (size-only)
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=multipart_key)
+        purge_s3_key(bucket_name, multipart_key)
 
 
 def test_add_exists_ok_regular(manifest_fname):
@@ -1825,7 +1858,7 @@ def test_etag_check_detects_replaced_file(manifest_fname, cleandir2, check_s3_bu
             with pytest.raises(FileMismatchError, match="Remote ETag.*has changed"):
                 dm.sync_record("ext/replaceable.txt", skip_remote_check=False)
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_etag_check_skipped_for_versioned_external(manifest_fname, check_s3_bucket_versioning):
@@ -1887,7 +1920,7 @@ def test_skip_remote_check_flag_bypasses_etag(manifest_fname, cleandir2, check_s
         with DataManifest(manifest_path) as dm:
             dm.sync_record("ext/skip_check.txt", skip_remote_check=True)
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_etag_check_on_resync_cached(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -1925,7 +1958,7 @@ def test_etag_check_on_resync_cached(manifest_fname, cleandir2, check_s3_bucket_
             with pytest.raises(FileMismatchError, match="Remote ETag.*has changed"):
                 dm.sync_record("ext/cached_drift.txt", skip_remote_check=False)
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_md5sum_backfill_on_writer_sync(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -1975,7 +2008,7 @@ def test_md5sum_backfill_on_writer_sync(manifest_fname, cleandir2, check_s3_buck
             expected_md5 = calc_md5sum_from_fname(test_file)
             assert record.md5sum == expected_md5
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_md5sum_backfill_idempotent(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -2015,7 +2048,7 @@ def test_md5sum_backfill_idempotent(manifest_fname, cleandir2, check_s3_bucket_v
             md5_after_second = writer.get("ext/idempotent.bin", validate=False).md5sum
             assert md5_after_second == md5_after_first
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_reader_sync_does_not_backfill(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -2049,7 +2082,7 @@ def test_reader_sync_does_not_backfill(manifest_fname, cleandir2, check_s3_bucke
             record = dm.get("ext/no_backfill.bin", validate=False)
             assert record.md5sum == "", "Reader sync should not backfill md5sum"
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_md5sum_backfill_enables_full_validate(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -2087,7 +2120,7 @@ def test_md5sum_backfill_enables_full_validate(manifest_fname, cleandir2, check_
             assert record.md5sum != "", "md5sum should have been backfilled"
             dm.validate_record("ext/validate_backfill.bin", check_md5sum=True)
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_sync_main_auto_upgrade_to_writer(manifest_fname, cleandir2, check_s3_bucket_versioning):
@@ -2130,7 +2163,7 @@ def test_sync_main_auto_upgrade_to_writer(manifest_fname, cleandir2, check_s3_bu
             expected_md5 = calc_md5sum_from_fname(test_file)
             assert record.md5sum == expected_md5
     finally:
-        s3_client.delete_object(Bucket=bucket_name, Key=ext_key)
+        purge_s3_key(bucket_name, ext_key)
 
 
 def test_sync_main_uses_reader_when_no_backfill_needed(manifest_fname):

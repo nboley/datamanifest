@@ -1329,13 +1329,15 @@ def test_v2_to_v3_upgrade_on_write(cleandir, check_s3_bucket_versioning):
 
     # Verify the original v2 record has empty s3_hash and source_uri after upgrade
     first_record_line = [l for l in data_lines if l.startswith("first.txt")][0]
-    first_cols = first_record_line.strip().split("\t")
+    # rstrip("\n"), not strip(): trailing empty columns end the line in tabs,
+    # and strip() would eat them along with the newline.
+    first_cols = first_record_line.rstrip("\n").split("\t")
     assert first_cols[3] == "", f"Expected empty s3_hash for upgraded v2 record, got '{first_cols[3]}'"
     assert first_cols[5] == "", f"Expected empty source_uri for upgraded v2 record, got '{first_cols[5]}'"
 
     # Verify the new record has populated s3_hash
     second_record_line = [l for l in data_lines if l.startswith("second.txt")][0]
-    second_cols = second_record_line.strip().split("\t")
+    second_cols = second_record_line.rstrip("\n").split("\t")
     assert second_cols[3] != "", f"Expected non-empty s3_hash for new v3 record"
     assert second_cols[5] == "", f"Expected empty source_uri for regular record, got '{second_cols[5]}'"
 
@@ -2174,8 +2176,14 @@ def test_get_local_cache_path_rejects_empty_hashes(cleandir):
 
 
 def test_remote_path_from_uri_rejects_params():
-    """from_uri raises ValueError (not AssertionError) for URIs with params."""
-    with pytest.raises(ValueError, match="Unexpected params"):
+    """from_uri rejects URIs with a ';params' segment.
+
+    urlparse only splits ';params' off the path for schemes in
+    urllib.parse.uses_params, and 's3' is not one of them, so the ';' stays in
+    the path and is rejected by prefix validation rather than by a dedicated
+    params check.  InvalidPrefix subclasses ValueError either way.
+    """
+    with pytest.raises(InvalidPrefix, match="contains invalid characters"):
         RemotePath.from_uri("s3://bucket/path;params")
 
 

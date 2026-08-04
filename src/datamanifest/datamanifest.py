@@ -202,8 +202,12 @@ class RemotePath:
     def from_uri(cls, uri, skip_validation=False):
         parsed_uri = urlparse(uri)
         if not skip_validation:
-            if parsed_uri.params:
-                raise ValueError(f"Unexpected params in URI: {uri}")
+            # No params check here: urlparse only splits a ';params' segment off
+            # the path for schemes in urllib.parse.uses_params, and 's3' is not
+            # one of them, while __post_init__ rejects every non-s3 scheme. So
+            # parsed_uri.params was always "" and the check could never fire; a
+            # URI carrying ';params' keeps it in the path and is rejected by
+            # prefix validation. See test_remote_path_from_uri_rejects_params.
             if parsed_uri.fragment:
                 raise ValueError(f"Unexpected fragment in URI: {uri}")
         version_id = ""

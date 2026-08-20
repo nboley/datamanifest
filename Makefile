@@ -49,6 +49,14 @@ docker-login:
 
 # Create and push git tag
 tag:
+	@# VERSION is read from the WORKING TREE. If pyproject.toml is uncommitted,
+	@# the tag would point at HEAD, which declares a different version.
+	@if ! git diff --quiet HEAD -- pyproject.toml; then \
+		echo "Error: pyproject.toml has uncommitted changes; refusing to tag."; \
+		echo "  Working tree declares $(VERSION), but the tag would point at HEAD,"; \
+		echo "  which declares something else. Commit the version bump first."; \
+		exit 1; \
+	fi
 	@echo "Creating git tag v$(VERSION)..."
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
 		echo "Error: Tag v$(VERSION) already exists"; \

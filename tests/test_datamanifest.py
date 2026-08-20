@@ -2672,3 +2672,26 @@ def test_cli_add_url(mock_urlopen, cleandir):
     assert record.md5sum == expected_md5
     assert record.notes == "cli note"
     dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_s3_uri_backward_compat(mock_urlopen, cleandir):
+    """Test: add_external(key, s3_uri=...) still works with deprecation warning."""
+    content = b"backward compat content"
+    mock_urlopen.return_value = _mock_http_response(content, etag='"compat"')
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+
+    import warnings
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        dm.add_external("test/compat.txt", s3_uri="https://example.com/compat.txt")
+        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(deprecation_warnings) == 1
+        assert "s3_uri" in str(deprecation_warnings[0].message)
+
+    record = dm.get("test/compat.txt", validate=False)
+    assert record.is_external
+    assert record.source_uri == "https://example.com/compat.txt"
+    assert record.md5sum == hashlib.md5(content).hexdigest()
+    dm.close()

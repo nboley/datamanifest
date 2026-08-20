@@ -121,6 +121,13 @@ def add_s3_main(manifest_fname, key, s3_uri, notes=""):
     dm.add_external(key, s3_uri, notes=notes)
 
 
+def add_url_main(manifest_fname, key, url, notes=""):
+    dm = DataManifestWriter(manifest_fname)
+    dm.add_external(key, url, notes=notes)
+    record = dm.get(key, validate=False)
+    print(f"Added {key}: md5={record.md5sum} size={record.size} etag={record.s3_hash or '(none)'}")
+
+
 def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
     # Check if any external records need md5sum backfill — requires writer access.
     # Note: there is a small TOCTOU window between this check and opening the
@@ -213,6 +220,15 @@ def parse_args():
     add_s3_subparser.add_argument("s3-uri", help="Full S3 URI (optionally with ?versionId=...)")
     add_s3_subparser.add_argument("--notes", default="", help="Optional annotation")
 
+    add_url_subparser = subparsers.add_parser(
+        "add-url",
+        help="Add an HTTP/HTTPS URL as an external resource",
+    )
+    add_url_subparser.add_argument("manifest-path", help="Path to the manifest TSV file")
+    add_url_subparser.add_argument("key", help="Key for the resource in the manifest")
+    add_url_subparser.add_argument("url", help="HTTP or HTTPS URL to the resource")
+    add_url_subparser.add_argument("--notes", default="", help="Optional notes")
+
     add_subdirectory_subparser = subparsers.add_parser(
         "add-multiple", help="add files to a data manifest by traversing a directory. Keys are inferred from relative file path.",
     )
@@ -272,6 +288,13 @@ def main():
             key=args.key,
             s3_uri=getattr(args, "s3-uri"),
             notes=args.notes,
+        )
+    elif args.command == "add-url":
+        add_url_main(
+            getattr(args, "manifest-path"),
+            args.key,
+            args.url,
+            args.notes,
         )
     elif args.command == "add-multiple":
         add_subdirectory_main(

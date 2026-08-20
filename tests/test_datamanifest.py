@@ -2230,3 +2230,445 @@ def test_build_datastore_suffix_rejects_empty_hash():
     """_build_datastore_suffix raises ValueError when file_hash is empty."""
     with pytest.raises(ValueError, match="no file hash available"):
         DataManifest._build_datastore_suffix("some/key.txt", "")
+
+
+# ---------------------------------------------------------------------------
+# HTTP External Resource Tests
+# ---------------------------------------------------------------------------
+
+import hashlib
+import http.client
+import io
+from unittest.mock import patch, MagicMock
+
+from datamanifest.datamanifest import (
+    _get_http_resource_metadata,
+    _download_http_to_file,
+    _normalize_http_etag,
+    FileMismatchError as _FM,
+)
+
+
+def _mock_http_response(content, etag=None, content_length=None):
+    """Create a mock urllib response with proper context manager support."""
+    resp = MagicMock()
+    buf = io.BytesIO(content)
+    resp.read = buf.read
+    resp.headers = http.client.HTTPMessage()
+    if etag is not None:
+        resp.headers['ETag'] = etag
+    if content_length is not None:
+        resp.headers['Content-Length'] = str(content_length)
+    resp.__enter__ = lambda s: s
+    resp.__exit__ = MagicMock(return_value=False)
+    return resp
+
+
+def _make_http_manifest(cleandir, manifest_path=None):
+    """Create a minimal manifest with local config for HTTP external tests."""
+    if manifest_path is None:
+        manifest_path = os.path.join(cleandir, "test.data_manifest.tsv")
+
+    local_cache = os.path.join(cleandir, "cache")
+    checkout = os.path.join(cleandir, "checkout")
+    os.makedirs(local_cache, mode=0o2775, exist_ok=True)
+    os.chmod(local_cache, 0o2775)
+    os.makedirs(checkout, exist_ok=True)
+
+    # Create a real manifest via DataManifestWriter.new requires S3.
+    # Instead, write the manifest and local config manually.
+    with open(manifest_path, "w") as f:
+        f.write(f"#MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write("#REMOTE_DATA_MIRROR_URI=s3://dummy-bucket/dummy-path\n")
+        f.write("#LOCAL_CACHE_PATH_SUFFIX=./cache/\n")
+        f.write("key\ts3_version_id\tmd5sum\ts3_hash\tsize\tsource_uri\tnotes\n")
+
+    with open(manifest_path + ".local_config", "w") as f:
+        f.write(f"MANIFEST_VERSION={MANIFEST_VERSION}\n")
+        f.write(f"CHECKOUT_PREFIX={checkout}\n")
+        f.write(f"LOCAL_CACHE_PREFIX={local_cache}\n")
+
+    return manifest_path
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_http_basic(mock_urlopen, cleandir):
+    """Test 1: Basic HTTP external add with ETag and Content-Length."""
+    content = b"test file content for http"
+    expected_md5 = hashlib.md5(content).hexdigest()
+    mock_urlopen.return_value = _mock_http_response(
+        content, etag='"abc123"', content_length=len(content)
+    )
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/file.txt", "https://example.com/file.txt")
+
+    record = dm.get("test/file.txt", validate=False)
+    assert record.is_external
+    assert record.md5sum == expected_md5
+    assert record.s3_hash == "abc123"
+    assert record.size == len(content)
+    assert record.source_uri == "https://example.com/file.txt"
+    assert record.s3_version_id == ""
+
+    # Verify file exists in cache
+    cache_path = dm.get_local_cache_path("test/file.txt")
+    assert os.path.exists(cache_path)
+    with open(cache_path, "rb") as f:
+        assert f.read() == content
+
+    # Verify checkout symlink
+    assert os.path.islink(record.path)
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_http_no_etag(mock_urlopen, cleandir):
+    """Test 2: HTTP external add without ETag header."""
+    content = b"no etag content"
+    expected_md5 = hashlib.md5(content).hexdigest()
+    mock_urlopen.return_value = _mock_http_response(content)
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/noetag.txt", "https://example.com/noetag.txt")
+
+    record = dm.get("test/noetag.txt", validate=False)
+    assert record.s3_hash == ""
+    assert record.md5sum == expected_md5
+    assert record.size == len(content)
+
+    # Cache path should use md5sum when s3_hash is empty
+    cache_path = dm.get_local_cache_path("test/noetag.txt")
+    assert expected_md5 in cache_path
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_http_weak_etag(mock_urlopen, cleandir):
+    """Test 3: HTTP external add with weak ETag (W/ prefix)."""
+    content = b"weak etag content"
+    mock_urlopen.return_value = _mock_http_response(
+        content, etag='W/"weakval123"'
+    )
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/weak.txt", "https://example.com/weak.txt")
+
+    record = dm.get("test/weak.txt", validate=False)
+    assert record.s3_hash == "weakval123"
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_http_duplicate_key(mock_urlopen, cleandir):
+    """Test 4: Duplicate key raises KeyAlreadyExistsError."""
+    content = b"dup content"
+    mock_urlopen.return_value = _mock_http_response(content, etag='"e1"')
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/dup.txt", "https://example.com/dup.txt")
+
+    # Reset mock for second call
+    mock_urlopen.return_value = _mock_http_response(content, etag='"e1"')
+    with pytest.raises(KeyAlreadyExistsError):
+        dm.add_external("test/dup.txt", "https://example.com/dup2.txt")
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_add_external_http_immutable(mock_urlopen, cleandir):
+    """Test 5: HTTP external records are immutable (update and datastore-delete blocked)."""
+    content = b"immutable content"
+    mock_urlopen.return_value = _mock_http_response(content, etag='"imm"')
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/immutable.txt", "https://example.com/immutable.txt")
+
+    # Create a temp file for update attempt
+    tmp = os.path.join(cleandir, "replacement.txt")
+    with open(tmp, "w") as f:
+        f.write("new content")
+
+    with pytest.raises(ValueError, match="immutable"):
+        dm.update("test/immutable.txt", tmp)
+
+    with pytest.raises(ValueError, match="External"):
+        dm.delete("test/immutable.txt", delete_from_datastore=True)
+
+    # But reference-only delete should work
+    dm.delete("test/immutable.txt")
+    assert "test/immutable.txt" not in dm
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_sync_http_external_md5_match(mock_urlopen, cleandir):
+    """Test 6: Sync re-downloads HTTP external when cache is missing, md5 matches."""
+    content = b"sync test content"
+    expected_md5 = hashlib.md5(content).hexdigest()
+
+    # First call: add_external downloads the file
+    mock_urlopen.return_value = _mock_http_response(content, etag='"sync1"')
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/sync.txt", "https://example.com/sync.txt")
+    cache_path = dm.get_local_cache_path("test/sync.txt")
+    dm.close()
+
+    # Remove the cached file to force re-download
+    os.unlink(cache_path)
+    # Also remove the checkout symlink (it's dangling now)
+    checkout_path = os.path.join(cleandir, "checkout", "test/sync.txt")
+    if os.path.islink(checkout_path):
+        os.unlink(checkout_path)
+
+    # Second call: sync should re-download
+    # HEAD for etag check + GET for download
+    head_resp = MagicMock()
+    head_resp.headers = http.client.HTTPMessage()
+    head_resp.headers['ETag'] = '"sync1"'
+    head_resp.__enter__ = lambda s: s
+    head_resp.__exit__ = MagicMock(return_value=False)
+
+    get_resp = _mock_http_response(content, etag='"sync1"', content_length=len(content))
+
+    mock_urlopen.side_effect = [head_resp, get_resp]
+
+    dm2 = DataManifest(manifest_path)
+    dm2.sync_record("test/sync.txt")
+
+    assert os.path.exists(cache_path)
+    with open(cache_path, "rb") as f:
+        assert f.read() == content
+    dm2.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_sync_http_external_md5_mismatch(mock_urlopen, cleandir):
+    """Test 7: Sync raises FileMismatchError when re-downloaded content has different md5."""
+    original_content = b"original content"
+    changed_content = b"CHANGED content!!!"
+
+    # Add with original content
+    mock_urlopen.return_value = _mock_http_response(original_content, etag='"orig"')
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/mismatch.txt", "https://example.com/mismatch.txt")
+    cache_path = dm.get_local_cache_path("test/mismatch.txt")
+    dm.close()
+
+    # Remove cache and checkout to force re-download
+    os.unlink(cache_path)
+    checkout_path = os.path.join(cleandir, "checkout", "test/mismatch.txt")
+    if os.path.islink(checkout_path):
+        os.unlink(checkout_path)
+
+    # HEAD returns changed etag, GET returns different content
+    head_resp = MagicMock()
+    head_resp.headers = http.client.HTTPMessage()
+    head_resp.headers['ETag'] = '"changed"'
+    head_resp.__enter__ = lambda s: s
+    head_resp.__exit__ = MagicMock(return_value=False)
+
+    get_resp = _mock_http_response(changed_content, etag='"changed"', content_length=len(changed_content))
+
+    mock_urlopen.side_effect = [head_resp, get_resp]
+
+    dm2 = DataManifest(manifest_path)
+    with pytest.raises(FileMismatchError, match="MD5 mismatch"):
+        dm2.sync_record("test/mismatch.txt")
+    dm2.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_check_remote_etag_http_changed(mock_urlopen, cleandir):
+    """Test 8: ETag drift detection triggers re-download."""
+    content = b"etag drift content"
+
+    # Add the record
+    mock_urlopen.return_value = _mock_http_response(content, etag='"etag_v1"')
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/drift.txt", "https://example.com/drift.txt")
+    dm.close()
+
+    # HEAD returns changed ETag, then GET re-downloads same content (md5 matches)
+    head_resp = MagicMock()
+    head_resp.headers = http.client.HTTPMessage()
+    head_resp.headers['ETag'] = '"etag_v2"'
+    head_resp.__enter__ = lambda s: s
+    head_resp.__exit__ = MagicMock(return_value=False)
+
+    get_resp = _mock_http_response(content, etag='"etag_v2"', content_length=len(content))
+
+    mock_urlopen.side_effect = [head_resp, get_resp]
+
+    dm2 = DataManifest(manifest_path)
+    # Should succeed: etag changed but md5 still matches
+    dm2.sync_record("test/drift.txt", skip_remote_check=False)
+    dm2.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_check_remote_etag_http_no_etag_stored(mock_urlopen, cleandir):
+    """Test 9: No ETag stored — _check_remote_etag returns without error."""
+    content = b"no etag stored content"
+
+    # Add with no ETag
+    mock_urlopen.return_value = _mock_http_response(content)
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/noetag2.txt", "https://example.com/noetag2.txt")
+    dm.close()
+
+    # sync should not do HEAD (no etag to compare), just validate cached file
+    dm2 = DataManifest(manifest_path)
+    # mock_urlopen should NOT be called (file already cached, no etag check needed)
+    mock_urlopen.reset_mock()
+    dm2.sync_record("test/noetag2.txt", skip_remote_check=False)
+    # urlopen should not have been called since file is cached and no etag to check
+    mock_urlopen.assert_not_called()
+    dm2.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_http_download_retry_on_5xx(mock_urlopen, cleandir):
+    """Test 10: Retry on 5xx errors, then succeed."""
+    import urllib.error
+    content = b"retry content"
+
+    # First two calls raise 500, third succeeds
+    error_500 = urllib.error.HTTPError(
+        "https://example.com/retry.txt", 500, "Internal Server Error", {}, io.BytesIO(b"")
+    )
+    success_resp = _mock_http_response(content, etag='"retry_ok"', content_length=len(content))
+
+    mock_urlopen.side_effect = [error_500, error_500, success_resp]
+
+    with patch("datamanifest.datamanifest.time.sleep"):
+        result = _get_http_resource_metadata("https://example.com/retry.txt", retries=3)
+
+    assert result["md5sum"] == hashlib.md5(content).hexdigest()
+    assert result["size"] == len(content)
+    # Clean up temp file
+    os.unlink(result["local_path"])
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_http_download_network_error(mock_urlopen):
+    """Test 11: Network error raises URLError with clear message."""
+    import urllib.error
+    mock_urlopen.side_effect = urllib.error.URLError("Name or service not known")
+
+    with pytest.raises(urllib.error.URLError):
+        _get_http_resource_metadata("https://nonexistent.example.com/file.txt", retries=1)
+
+
+def test_remote_path_accepts_http():
+    """Test 12: RemotePath.from_uri accepts https:// URIs."""
+    rp = RemotePath.from_uri("https://example.com/path/to/file.txt", skip_validation=True)
+    assert rp.scheme == "https"
+    assert rp.bucket == "example.com"
+    assert rp.path == "path/to/file.txt"
+    assert rp.version_id == ""
+
+    # Also test http
+    rp2 = RemotePath.from_uri("http://data.example.org/files/data.csv", skip_validation=True)
+    assert rp2.scheme == "http"
+    assert rp2.bucket == "data.example.org"
+    assert rp2.path == "files/data.csv"
+
+
+def test_remote_path_rejects_ftp():
+    """Test 13: RemotePath rejects ftp:// scheme."""
+    with pytest.raises(ValueError, match="only supports s3 and http"):
+        RemotePath.from_uri("ftp://example.com/file.txt")
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_read_records_roundtrip_http(mock_urlopen, cleandir):
+    """Test 14: HTTP external record survives TSV write/read roundtrip."""
+    content = b"roundtrip content"
+    expected_md5 = hashlib.md5(content).hexdigest()
+    mock_urlopen.return_value = _mock_http_response(content, etag='"rt_etag"')
+
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    dm.add_external("test/roundtrip.txt", "https://example.com/roundtrip.txt", notes="test note")
+    dm.close()
+
+    # Re-open and verify all fields are preserved
+    dm2 = DataManifest(manifest_path)
+    record = dm2.get("test/roundtrip.txt", validate=False)
+    assert record.md5sum == expected_md5
+    assert record.s3_hash == "rt_etag"
+    assert record.size == len(content)
+    assert record.source_uri == "https://example.com/roundtrip.txt"
+    assert record.is_external
+    assert record.s3_version_id == ""
+    assert record.notes == "test note"
+    assert record.remote_uri.scheme == "https"
+    assert record.remote_uri.bucket == "example.com"
+    dm2.close()
+
+
+# Test 15 (integration) is skipped — requires network access to real URLs
+@pytest.mark.skipif(
+    os.environ.get("SKIP_NETWORK_TESTS", "1") == "1",
+    reason="Network tests disabled (set SKIP_NETWORK_TESTS=0 to enable)"
+)
+def test_add_url_integration(cleandir):
+    """Test 15: Integration test with a real HTTP URL.
+
+    Uses a small, stable public file. Requires network access.
+    """
+    manifest_path = _make_http_manifest(cleandir)
+    dm = DataManifestWriter(manifest_path)
+    # Use httpbin for a predictable response
+    dm.add_external(
+        "test/robots.txt",
+        "https://www.google.com/robots.txt",
+        notes="Google robots.txt"
+    )
+    record = dm.get("test/robots.txt", validate=False)
+    assert record.is_external
+    assert record.md5sum  # should be non-empty
+    assert record.size > 0
+    assert record.source_uri == "https://www.google.com/robots.txt"
+    dm.close()
+
+
+@patch("datamanifest.datamanifest.urllib.request.urlopen")
+def test_cli_add_url(mock_urlopen, cleandir):
+    """Test 16: CLI add-url command produces correct output."""
+    content = b"cli test content"
+    expected_md5 = hashlib.md5(content).hexdigest()
+    mock_urlopen.return_value = _mock_http_response(content, etag='"cli_etag"')
+
+    manifest_path = _make_http_manifest(cleandir)
+
+    from datamanifest.main import add_url_main
+    import io as _io
+    from unittest.mock import patch as _patch
+
+    # Capture stdout
+    captured = _io.StringIO()
+    with _patch("sys.stdout", captured):
+        add_url_main(manifest_path, "test/cli.txt", "https://example.com/cli.txt", "cli note")
+
+    output = captured.getvalue()
+    assert "Added test/cli.txt" in output
+    assert expected_md5 in output
+    assert str(len(content)) in output
+
+    # Verify the record was actually created
+    dm = DataManifest(manifest_path)
+    record = dm.get("test/cli.txt", validate=False)
+    assert record.md5sum == expected_md5
+    assert record.notes == "cli note"
+    dm.close()

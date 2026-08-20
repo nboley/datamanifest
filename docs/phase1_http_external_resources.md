@@ -1,5 +1,8 @@
 # Phase 1: HTTP/HTTPS External Resources
 
+**Status:** DELIVERED in v1.2.0 (merge `2d0c714`, 2026-08-20). Every success
+criterion below was met. Design: `docs/design_http_external_resources.md`.
+
 ## Problem
 
 DataManifest external resources only support S3 URIs. Public bioinformatics

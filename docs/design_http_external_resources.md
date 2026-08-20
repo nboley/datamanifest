@@ -1,5 +1,13 @@
 # Design: HTTP/HTTPS External Resources for datamanifest
 
+**Status:** IMPLEMENTED — shipped in v1.2.0 (merge `2d0c714`, 2026-08-20).
+Design review A- (2 rounds), implementation review A-, test audit found 0 wrong
+assertions. 107 tests pass on master. Implementation matched this design with no
+recorded divergences. Full gate log in `COORDINATION.http-external.md`.
+
+**Deliberately not covered here:** archive-to-mirror backup, deferred to
+`docs/pending/phase2_external_archive_backup.md`.
+
 ## Summary
 
 This design extends `datamanifest`'s external resource support from S3-only to include `http://` and `https://` URIs. Public bioinformatics databases (JASPAR, HOCOMOCO, GENCODE) publish data over HTTP only, currently forcing users to mirror files to S3 or hardcode local paths. The change adds an `add-url` CLI command and extends the Python API so that `add_external()` accepts HTTP(S) URIs, downloads the file at add-time to compute an authoritative MD5 pin, and records it as an immutable external record in the existing v3 manifest format. No new dependencies are introduced; all HTTP operations use stdlib `urllib.request`. The manifest schema is unchanged — older datamanifest versions will fail clearly at `RemotePath.__post_init__` (L226) when encountering an `http`/`https` scheme, rather than silently mishandling the record.

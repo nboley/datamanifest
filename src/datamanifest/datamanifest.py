@@ -1476,28 +1476,34 @@ class DataManifestWriter(DataManifest):
         elif parsed.scheme in ("http", "https"):
             _validate_tsv_safe(uri, "source_uri")
             meta = _get_http_resource_metadata(uri)
-            record = DataManifestRecord(
-                key=key,
-                md5sum=meta["md5sum"],
-                s3_hash=meta["etag"],
-                size=meta["size"],
-                notes=notes,
-                path=self._build_checkout_path(self.checkout_prefix, key),
-                remote_uri=RemotePath.from_uri(uri, skip_validation=True),
-                source_uri=uri,
-            )
+            try:
+                record = DataManifestRecord(
+                    key=key,
+                    md5sum=meta["md5sum"],
+                    s3_hash=meta["etag"],
+                    size=meta["size"],
+                    notes=notes,
+                    path=self._build_checkout_path(self.checkout_prefix, key),
+                    remote_uri=RemotePath.from_uri(uri, skip_validation=True),
+                    source_uri=uri,
+                )
 
-            # Store the record first: get_local_cache_path() and
-            # _update_local_checkout() both look up self._data[key].
-            self._data[key] = record
+                # Store the record first: get_local_cache_path() and
+                # _update_local_checkout() both look up self._data[key].
+                self._data[key] = record
 
-            # Move downloaded file from temp to local cache
-            cache_path = self.get_local_cache_path(key)
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            shutil.move(meta["local_path"], cache_path)
-            os.chmod(cache_path, DEFAULT_FILE_PERMISSIONS)
-            self._update_local_checkout(key)
-            self._save_to_disk()
+                # Move downloaded file from temp to local cache
+                cache_path = self.get_local_cache_path(key)
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                shutil.move(meta["local_path"], cache_path)
+                os.chmod(cache_path, DEFAULT_FILE_PERMISSIONS)
+                self._update_local_checkout(key)
+                self._save_to_disk()
+            except Exception:
+                # Clean up temp file if anything fails after download
+                if os.path.exists(meta["local_path"]):
+                    os.unlink(meta["local_path"])
+                raise
         else:
             raise ValueError(f"Unsupported URI scheme: {parsed.scheme}")
 

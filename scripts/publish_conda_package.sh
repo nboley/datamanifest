@@ -110,7 +110,7 @@ log_info "Using repository: ${REPO_NAME}"
 # =============================================================================
 
 # Read version from pyproject.toml (single source of truth)
-VERSION=$(grep '^version' "${PROJECT_ROOT}/pyproject.toml" | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
+VERSION=$(grep '^version' "${PROJECT_ROOT}/pyproject.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$VERSION" ]; then
     log_error "Could not determine version from pyproject.toml"

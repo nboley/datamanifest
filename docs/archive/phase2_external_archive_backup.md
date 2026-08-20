@@ -1,6 +1,21 @@
 # Phase 2: External Resource Archive Backup
 
-**Depends on:** Phase 1 (HTTP external resources)
+**Status: WON'T DO** — decided 2026-08-20, before any implementation.
+
+Scoped and specified but deliberately not built. Phase 1 shipped in v1.2.0 and
+pins HTTP external resources by content md5, so a changed upstream is *detected*
+(sync raises `FileMismatchError`) even though it cannot be *recovered* from.
+Archiving to the mirror would close that recovery gap, at the cost of an upload
+on every `add_external` and a second storage location to keep consistent.
+
+The residual risk was judged acceptable: the resources in question are public
+bioinformatics databases published at stable versioned URLs, and the local cache
+retains a copy once synced.
+
+Kept as a written record so the tradeoff does not have to be rediscovered. If an
+upstream resource is ever lost in practice, this is the design to revive.
+
+**Depends on:** Phase 1 (HTTP external resources) — shipped in v1.2.0
 
 ## Problem
 

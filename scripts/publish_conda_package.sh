@@ -109,11 +109,11 @@ log_info "Using repository: ${REPO_NAME}"
 # Locate Artifacts
 # =============================================================================
 
-# Read version from recipe.yaml
-VERSION=$(grep '^\s*version:' "${PROJECT_ROOT}/recipe/recipe.yaml" | head -1 | sed -E 's/.*version:\s*"?([^"[:space:]]+)"?.*/\1/')
+# Read version from pyproject.toml (single source of truth)
+VERSION=$(grep '^version' "${PROJECT_ROOT}/pyproject.toml" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$VERSION" ]; then
-    log_error "Could not determine version from recipe/recipe.yaml"
+    log_error "Could not determine version from pyproject.toml"
     exit 1
 fi
 
@@ -189,7 +189,7 @@ for artifact in "${ARTIFACTS[@]}"; do
             ;;
         409)
             log_warn "  Package already exists in Artifactory (HTTP 409)"
-            log_warn "    Bump version in recipe.yaml to publish a new version"
+            log_warn "    Bump version in pyproject.toml to publish a new version"
             UPLOAD_SKIPPED=$((UPLOAD_SKIPPED + 1))
             ;;
         *)

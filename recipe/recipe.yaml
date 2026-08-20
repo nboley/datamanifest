@@ -1,8 +1,11 @@
 schema_version: 1
 
+context:
+  version: ${{ pkg_version }}
+
 package:
   name: datamanifest
-  version: "1.2.0"
+  version: ${{ version }}
 
 source:
   path: ..

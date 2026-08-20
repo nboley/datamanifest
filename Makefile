@@ -1,7 +1,7 @@
 # Makefile for building and publishing conda packages and Docker images
 
 PACKAGE_NAME := datamanifest
-VERSION := $(shell grep '^\s*version:' recipe/recipe.yaml | head -1 | sed -E 's/.*version:\s*"?([0-9.]+)"?.*/\1/')
+VERSION ?= $(shell grep '^version' pyproject.toml | head -1 | sed -E 's/.*"([0-9.]+)".*/\1/')
 ECR_REGISTRY := 573640641260.dkr.ecr.us-east-1.amazonaws.com/omni
 IMAGE_NAME := $(PACKAGE_NAME)
 IMAGE_TAG := $(ECR_REGISTRY)/$(IMAGE_NAME):$(VERSION)
@@ -52,7 +52,7 @@ tag:
 	@echo "Creating git tag v$(VERSION)..."
 	@if git rev-parse "v$(VERSION)" >/dev/null 2>&1; then \
 		echo "Error: Tag v$(VERSION) already exists"; \
-		echo "Please bump the version in recipe/recipe.yaml and pyproject.toml first"; \
+		echo "Please bump the version in pyproject.toml first"; \
 		exit 1; \
 	fi
 	@git tag -a "v$(VERSION)" -m "Release version $(VERSION)"
@@ -65,7 +65,7 @@ conda: conda-build conda-publish
 # Build conda package with rattler-build
 conda-build:
 	@echo "Building conda package..."
-	@rattler-build build --recipe recipe/recipe.yaml; \
+	@rattler-build build --recipe recipe/recipe.yaml --variant pkg_version=$(VERSION); \
 	BUILD_EXIT=$$?; \
 	if [ $$BUILD_EXIT -ne 0 ] && [ ! -d output ] || [ -z "$$(find output -name '*.conda' 2>/dev/null)" ]; then \
 		echo "Error: Conda build failed (exit code $$BUILD_EXIT)"; \

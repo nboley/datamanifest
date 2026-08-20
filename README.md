@@ -267,6 +267,54 @@ Type 'I am sure' to continue: I am sure
 
 This permanently deletes the specific version from S3 (other versions of the same key remain accessible).
 
+### Adding External Resources (S3 and HTTP)
+
+External resources are files that live outside the manifest's mirror bucket. They can be in another S3 bucket or at a public HTTP/HTTPS URL.
+
+#### S3 External Resources
+
+Reference an existing S3 object without re-uploading it:
+```
+> dm add-s3 test.data_manifest.tsv ref/peaks.bed s3://other-bucket/chipseq/peaks.bed
+```
+
+The object's ETag, size, and version ID (if the source bucket has versioning) are captured via HEAD request. No data is downloaded or copied.
+
+#### HTTP/HTTPS External Resources
+
+Register a public URL as a manifest resource:
+```
+> dm add-url test.data_manifest.tsv motifs/JASPAR2024.pfm \
+    "https://jaspar.elixir.no/download/data/2024/CORE/JASPAR2024_CORE_vertebrates_redundant_pfms_jaspar.txt" \
+    --notes "JASPAR 2024 CORE vertebrates redundant PFMs"
+Added motifs/JASPAR2024.pfm: md5=ca3421d5343e193c2172deece4d53469 size=681807 etag=...
+```
+
+Unlike S3 externals, HTTP resources are **downloaded at add-time** to compute an MD5 content pin. This MD5 is the authoritative version — on every subsequent sync, the downloaded content is verified against it. If the upstream file changes, sync raises `FileMismatchError`.
+
+The downloaded file is cached locally, so `sync` serves it without re-downloading unless the cache is cleared.
+
+#### Using external resources in Python
+
+```python
+from datamanifest import DataManifestWriter, DataManifest
+
+# Add an HTTP external resource
+dm = DataManifestWriter("manifest.tsv")
+dm.add_external(
+    key="motifs/JASPAR2024.pfm",
+    uri="https://jaspar.elixir.no/download/data/2024/CORE/JASPAR2024_CORE_vertebrates_redundant_pfms_jaspar.txt",
+    notes="JASPAR 2024 CORE vertebrates"
+)
+
+# Later, resolve the local path (downloads if not cached)
+dm = DataManifest("manifest.tsv")
+record = dm.sync_and_get("motifs/JASPAR2024.pfm")
+print(record.path)  # local symlink to cached file
+```
+
+External resources are immutable — `update()` and `delete(delete_from_datastore=True)` raise `ValueError`.
+
 # Gotchas and Caveats
 
 ### S3 Bucket Versioning Required

@@ -20,6 +20,8 @@ import string
 import tempfile
 
 from tqdm import tqdm
+import urllib.request
+import urllib.error
 from urllib.parse import urlparse, parse_qs
 
 from .config import (
@@ -132,23 +134,176 @@ def calc_md5sum_from_fname(fname):
 
 
 def calc_md5sum_from_remote_uri(remote_path):
-    """Calculate MD5 checksum of a remote S3 object.
-    
+    """Calculate MD5 checksum of a remote object.
+
     Args:
-        remote_path: RemotePath object with bucket, path, and version_id
+        remote_path: RemotePath object with scheme, bucket, path, and version_id
     """
     assert isinstance(remote_path, RemotePath)
-    if not remote_path.version_id:
-        raise ValueError("RemotePath must have a version_id to calculate MD5 from remote")
-    s3 = boto3.resource("s3")
-    bucket = s3.Bucket(remote_path.bucket)
-    remote_object = bucket.Object(remote_path.path)
-    with tempfile.NamedTemporaryFile("wb+") as fp:
-        remote_object.download_fileobj(fp, ExtraArgs={'VersionId': remote_path.version_id})
-        m = hashlib.md5()
-        fp.seek(0)
-        m.update(fp.read())
-        return m.hexdigest()
+    if remote_path.scheme == "s3":
+        if not remote_path.version_id:
+            raise ValueError("RemotePath must have a version_id to calculate MD5 from remote")
+        s3 = boto3.resource("s3")
+        bucket = s3.Bucket(remote_path.bucket)
+        remote_object = bucket.Object(remote_path.path)
+        with tempfile.NamedTemporaryFile("wb+") as fp:
+            remote_object.download_fileobj(fp, ExtraArgs={'VersionId': remote_path.version_id})
+            m = hashlib.md5()
+            fp.seek(0)
+            m.update(fp.read())
+            return m.hexdigest()
+    elif remote_path.scheme in ("http", "https"):
+        md5 = hashlib.md5()
+        with urllib.request.urlopen(remote_path.uri, timeout=300) as resp:
+            while True:
+                chunk = resp.read(8192)
+                if not chunk:
+                    break
+                md5.update(chunk)
+        return md5.hexdigest()
+    else:
+        raise ValueError(f"Unsupported scheme: {remote_path.scheme}")
+
+
+def _normalize_http_etag(raw):
+    """Normalize an HTTP ETag value: strip W/ prefix, then surrounding quotes."""
+    if raw.startswith('W/'):
+        raw = raw[2:]
+    return raw.strip('"')
+
+
+def _get_http_resource_metadata(url, retries=3):
+    """Download an HTTP(S) resource and return metadata.
+
+    Streams GET to a temp file while computing md5. Retries on 5xx/timeout.
+
+    Returns:
+        dict with keys: md5sum, size, etag, local_path
+    """
+    last_error = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url)
+            resp = urllib.request.urlopen(req, timeout=300)
+            content_length = resp.headers.get('Content-Length')
+            total = int(content_length) if content_length else None
+
+            md5 = hashlib.md5()
+            size = 0
+            tmp_fd, tmp_path = tempfile.mkstemp()
+            try:
+                with os.fdopen(tmp_fd, 'wb') as tmp_fp:
+                    with tqdm(total=total, unit='B', unit_scale=True,
+                              desc=os.path.basename(urlparse(url).path) or 'download',
+                              disable=total is None) as pbar:
+                        while True:
+                            chunk = resp.read(8192)
+                            if not chunk:
+                                break
+                            tmp_fp.write(chunk)
+                            md5.update(chunk)
+                            size += len(chunk)
+                            pbar.update(len(chunk))
+            except Exception:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+            raw_etag = resp.headers.get('ETag', '')
+            etag = _normalize_http_etag(raw_etag) if raw_etag else ''
+
+            return {
+                "md5sum": md5.hexdigest(),
+                "size": size,
+                "etag": etag,
+                "local_path": tmp_path,
+            }
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                last_error = e
+                logger.warning(f"HTTP {e.code} for {url}, retry {attempt + 1}/{retries}")
+                time.sleep(random.uniform(10, 60))
+                continue
+            raise
+        except urllib.error.URLError as e:
+            if attempt < retries - 1 and isinstance(e.reason, (TimeoutError, OSError)):
+                last_error = e
+                logger.warning(f"Network error for {url}: {e}, retry {attempt + 1}/{retries}")
+                time.sleep(random.uniform(10, 60))
+                continue
+            raise
+
+    raise last_error
+
+
+def _download_http_to_file(url, local_cache_path, record, retries=3):
+    """Download an HTTP resource to local_cache_path with md5 verification.
+
+    Streams to a temp file, verifies md5 matches record.md5sum, then renames.
+    Retries on 5xx/timeout (3 attempts with jittered backoff).
+    """
+    cache_dir = os.path.dirname(local_cache_path)
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            resp = urllib.request.urlopen(url, timeout=300)
+            content_length = resp.headers.get('Content-Length')
+            total = int(content_length) if content_length else None
+
+            md5 = hashlib.md5()
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=cache_dir)
+            try:
+                with os.fdopen(tmp_fd, 'wb') as tmp_fp:
+                    with tqdm(total=total, unit='B', unit_scale=True,
+                              desc=os.path.basename(record.key),
+                              disable=total is None) as pbar:
+                        while True:
+                            chunk = resp.read(8192)
+                            if not chunk:
+                                break
+                            tmp_fp.write(chunk)
+                            md5.update(chunk)
+                            pbar.update(len(chunk))
+
+                computed_md5 = md5.hexdigest()
+                if record.md5sum and computed_md5 != record.md5sum:
+                    os.unlink(tmp_path)
+                    raise FileMismatchError(
+                        f"MD5 mismatch for '{record.key}': "
+                        f"expected '{record.md5sum}', got '{computed_md5}'. "
+                        f"The upstream HTTP resource may have changed."
+                    )
+                os.rename(tmp_path, local_cache_path)
+                os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
+                return
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except urllib.error.HTTPError as e:
+            if e.code >= 500:
+                last_error = e
+                logger.warning(f"HTTP {e.code} downloading {url}, retry {attempt + 1}/{retries}")
+                time.sleep(random.uniform(10, 60))
+                continue
+            raise
+        except urllib.error.URLError as e:
+            if attempt < retries - 1 and isinstance(e.reason, (TimeoutError, OSError)):
+                last_error = e
+                logger.warning(f"Network error downloading {url}: {e}, retry {attempt + 1}/{retries}")
+                time.sleep(random.uniform(10, 60))
+                continue
+            raise
+        except FileMismatchError:
+            raise
+
+    raise last_error
 
 
 def _validate_prefix(prefix, ErrorClass):
@@ -224,12 +379,15 @@ class RemotePath:
         )
 
     def __post_init__(self):
-        if self.scheme != "s3":
+        if self.scheme not in ("s3", "http", "https"):
             raise ValueError(
-                "DataManifest currently only supports s3 for the remote cache."
+                f"DataManifest currently only supports s3 and http(s) "
+                f"for the remote cache (scheme={self.scheme})"
             )
         if not self._skip_validation:
-            _validate_prefix(self.path, InvalidPrefix)
+            if self.scheme == "s3":
+                _validate_prefix(self.path, InvalidPrefix)
+            # HTTP paths are not subject to S3 path restrictions
 
     @property
     def uri(self):
@@ -381,13 +539,36 @@ class DataManifest:
             return
         if record.s3_version_id:
             return
-        current_metadata = self._get_s3_object_metadata(record.remote_uri.uri)
-        if current_metadata["etag"] != record.s3_hash:
-            raise FileMismatchError(
-                f"Remote ETag for external record '{key}' has changed: "
-                f"expected '{record.s3_hash}', got '{current_metadata['etag']}'. "
-                f"The upstream file may have been replaced."
-            )
+
+        if record.remote_uri.scheme == "s3":
+            current_metadata = self._get_s3_object_metadata(record.remote_uri.uri)
+            if current_metadata["etag"] != record.s3_hash:
+                raise FileMismatchError(
+                    f"Remote ETag for external record '{key}' has changed: "
+                    f"expected '{record.s3_hash}', got '{current_metadata['etag']}'. "
+                    f"The upstream file may have been replaced."
+                )
+        elif record.remote_uri.scheme in ("http", "https"):
+            if not record.s3_hash:
+                # No ETag stored — cannot do drift check via HEAD.
+                # Full download + md5 verify will happen in _update_local_cache.
+                return
+            # HEAD request to check ETag
+            req = urllib.request.Request(record.source_uri, method='HEAD')
+            try:
+                resp = urllib.request.urlopen(req, timeout=30)
+            except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                # HEAD failure is non-fatal: log warning and let sync proceed
+                logger.warning(f"HEAD request failed for {key}: {e}. Skipping ETag drift check.")
+                return
+            raw_etag = resp.headers.get('ETag', '')
+            live_etag = _normalize_http_etag(raw_etag) if raw_etag else ''
+            if live_etag and live_etag != record.s3_hash:
+                logger.warning(
+                    f"ETag changed for {key}: stored={record.s3_hash}, "
+                    f"live={live_etag}. Will re-download and verify md5."
+                )
+                self._etag_drift_keys.add(key)
 
     def _update_local_cache(self, key, fast=False, retries=3, skip_remote_check=False):
         """Download key from the remote location to the local location."""
@@ -428,8 +609,8 @@ class DataManifest:
             if not skip_remote_check:
                 self._check_remote_etag(key)
 
-            # if local_path already exists, then make sure that it matches the remote file
-            if os.path.exists(local_cache_path):
+            # if local_path already exists and no ETag drift, validate cached file
+            if os.path.exists(local_cache_path) and key not in self._etag_drift_keys:
                 logger.debug(
                     f"'{key}' already exists in the local cache -- validating that it matches the manifest."
                 )
@@ -437,40 +618,49 @@ class DataManifest:
                     self._data[key], local_cache_path, check_md5sum=not fast
                 )
             else:
-                # if it doesn't then download the file (using version ID)
-                s3 = boto3.resource("s3")
-                bucket = s3.Bucket(self._data[key].remote_uri.bucket)
-                remote_key = self._data[key].remote_uri.path
-                version_id = self._data[key].s3_version_id
-                logger.info(f"Downloading '{remote_key}' (version: {version_id})")
-                remote_object = bucket.Object(remote_key)
-                if os.path.exists(local_cache_path):
-                    raise RuntimeError(
-                        f"local_cache_path '{local_cache_path}' already exists (this is unexpected)"
+                record = self._data[key]
+                if record.remote_uri.scheme in ("http", "https"):
+                    _download_http_to_file(
+                        record.source_uri, local_cache_path, record, retries=retries
                     )
-                extra_args = {'VersionId': version_id} if version_id else {}
-                downloaded = False
-                for rr in range(retries):
-                    try:
-                        remote_object.download_file(
-                            str(local_cache_path),
-                            ExtraArgs=extra_args
+                    self._etag_drift_keys.discard(key)
+                elif record.remote_uri.scheme == "s3":
+                    # download the file from S3 (using version ID)
+                    s3 = boto3.resource("s3")
+                    bucket = s3.Bucket(record.remote_uri.bucket)
+                    remote_key = record.remote_uri.path
+                    version_id = record.s3_version_id
+                    logger.info(f"Downloading '{remote_key}' (version: {version_id})")
+                    remote_object = bucket.Object(remote_key)
+                    if os.path.exists(local_cache_path):
+                        raise RuntimeError(
+                            f"local_cache_path '{local_cache_path}' already exists (this is unexpected)"
                         )
-                        downloaded = True
-                        break
-                    except botocore.exceptions.ResponseStreamingError:
-                        logger.error(
-                            f"Error downloading '{remote_key}' to '{local_cache_path}'"
-                            f"Retrying with retry number {rr+1} after a word from our sponsor..."
-                        )
-                        time.sleep(random.uniform(10, 60))
+                    extra_args = {'VersionId': version_id} if version_id else {}
+                    downloaded = False
+                    for rr in range(retries):
+                        try:
+                            remote_object.download_file(
+                                str(local_cache_path),
+                                ExtraArgs=extra_args
+                            )
+                            downloaded = True
+                            break
+                        except botocore.exceptions.ResponseStreamingError:
+                            logger.error(
+                                f"Error downloading '{remote_key}' to '{local_cache_path}'"
+                                f"Retrying with retry number {rr+1} after a word from our sponsor..."
+                            )
+                            time.sleep(random.uniform(10, 60))
 
-                if not downloaded:
-                    raise RuntimeError(
-                        f"Failed to download '{remote_key}' after {retries} retries"
-                    )
-                # set the permissions and group
-                os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
+                    if not downloaded:
+                        raise RuntimeError(
+                            f"Failed to download '{remote_key}' after {retries} retries"
+                        )
+                    # set the permissions and group
+                    os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
+                else:
+                    raise ValueError(f"Unsupported scheme: {record.remote_uri.scheme}")
 
     def _update_local_checkout(self, key):
         """Create symlink in the local checkout to the local cache"""
@@ -767,6 +957,7 @@ class DataManifest:
         except KeyError:
             raise MissingLocalConfigError(f"LOCAL_CACHE_PREFIX not present in the local config file '{self.local_config_path(manifest_fname)}\nHint: May need to checkout again.'")
 
+        self._etag_drift_keys = set()
         self._data = self._read_records(header_offset)
 
 
@@ -1221,48 +1412,100 @@ class DataManifestWriter(DataManifest):
                 self._data[key], fname_to_add, check_md5sum=False
             )
 
-    def add_external(self, key, s3_uri, notes=""):
-        """Add an external S3 object to the manifest without downloading it."""
+    def add_external(self, key, uri=None, notes="", **kwargs):
+        """Add an external resource to the manifest.
+
+        Supports S3 (s3://), HTTP (http://), and HTTPS (https://) URIs.
+        For S3: performs HEAD to capture metadata (no download).
+        For HTTP(S): downloads the full file to compute md5 content pin.
+        """
+        # Backward compatibility: accept s3_uri= as keyword arg
+        if uri is None and "s3_uri" in kwargs:
+            import warnings
+            warnings.warn(
+                "add_external(s3_uri=...) is deprecated, use uri=... instead",
+                DeprecationWarning, stacklevel=2,
+            )
+            uri = kwargs.pop("s3_uri")
+        if uri is None:
+            raise TypeError("add_external() missing required argument: 'uri'")
+
         validate_key(key)
         _validate_tsv_safe(notes, "notes")
         if key in self._data:
             raise KeyAlreadyExistsError(f"Key '{key}' already exists in '{self.fname}'. Delete first to re-add.")
 
-        metadata = self._get_s3_object_metadata(s3_uri)
-        etag = metadata["etag"]
-        size = metadata["size"]
-        version_id = metadata["version_id"]
+        parsed = urlparse(uri)
+        if parsed.scheme == "s3":
+            metadata = self._get_s3_object_metadata(uri)
+            etag = metadata["etag"]
+            size = metadata["size"]
+            version_id = metadata["version_id"]
 
-        encryption = metadata["encryption"]
-        is_opaque_etag = (
-            is_multipart_etag(etag)
-            or encryption in ("aws:kms", "aws:kms:dkek")
-            or bool(metadata.get("sse_customer_algorithm"))
-        )
-        md5sum = "" if is_opaque_etag else etag
+            encryption = metadata["encryption"]
+            is_opaque_etag = (
+                is_multipart_etag(etag)
+                or encryption in ("aws:kms", "aws:kms:dkek")
+                or bool(metadata.get("sse_customer_algorithm"))
+            )
+            md5sum = "" if is_opaque_etag else etag
 
-        parsed = RemotePath.from_uri(s3_uri, skip_validation=True)
-        source_uri = f"s3://{parsed.bucket}/{parsed.path}"
+            remote_parsed = RemotePath.from_uri(uri, skip_validation=True)
+            source_uri = f"s3://{remote_parsed.bucket}/{remote_parsed.path}"
 
-        _validate_tsv_safe(source_uri, "source_uri")
+            _validate_tsv_safe(source_uri, "source_uri")
 
-        remote_uri = RemotePath.from_uri(source_uri, skip_validation=True)
-        if version_id:
-            remote_uri = dataclasses.replace(remote_uri, version_id=version_id)
+            remote_uri = RemotePath.from_uri(source_uri, skip_validation=True)
+            if version_id:
+                remote_uri = dataclasses.replace(remote_uri, version_id=version_id)
 
-        record = DataManifestRecord(
-            key=key,
-            md5sum=md5sum,
-            s3_hash=etag,
-            size=size,
-            notes=notes,
-            path=self._build_checkout_path(self.checkout_prefix, key),
-            remote_uri=remote_uri,
-            source_uri=source_uri,
-        )
+            record = DataManifestRecord(
+                key=key,
+                md5sum=md5sum,
+                s3_hash=etag,
+                size=size,
+                notes=notes,
+                path=self._build_checkout_path(self.checkout_prefix, key),
+                remote_uri=remote_uri,
+                source_uri=source_uri,
+            )
 
-        self._data[key] = record
-        self._save_to_disk()
+            self._data[key] = record
+            self._save_to_disk()
+
+        elif parsed.scheme in ("http", "https"):
+            _validate_tsv_safe(uri, "source_uri")
+            meta = _get_http_resource_metadata(uri)
+            try:
+                record = DataManifestRecord(
+                    key=key,
+                    md5sum=meta["md5sum"],
+                    s3_hash=meta["etag"],
+                    size=meta["size"],
+                    notes=notes,
+                    path=self._build_checkout_path(self.checkout_prefix, key),
+                    remote_uri=RemotePath.from_uri(uri, skip_validation=True),
+                    source_uri=uri,
+                )
+
+                # Store the record first: get_local_cache_path() and
+                # _update_local_checkout() both look up self._data[key].
+                self._data[key] = record
+
+                # Move downloaded file from temp to local cache
+                cache_path = self.get_local_cache_path(key)
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                shutil.move(meta["local_path"], cache_path)
+                os.chmod(cache_path, DEFAULT_FILE_PERMISSIONS)
+                self._update_local_checkout(key)
+                self._save_to_disk()
+            except Exception:
+                # Clean up temp file if anything fails after download
+                if os.path.exists(meta["local_path"]):
+                    os.unlink(meta["local_path"])
+                raise
+        else:
+            raise ValueError(f"Unsupported URI scheme: {parsed.scheme}")
 
     def update(self, key, fname_to_add, notes=""):
         """Update a file that is in the manifest and upload to S3."""

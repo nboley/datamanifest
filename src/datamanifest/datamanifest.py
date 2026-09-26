@@ -14,6 +14,7 @@ import re
 import shutil
 from pathlib import Path
 from contextlib import contextmanager
+import io
 import string
 import tempfile
 
@@ -1070,9 +1071,40 @@ class DataManifest:
 
 
 class DataManifestWriter(DataManifest):
+    @staticmethod
+    def _parse_manifest_records(content):
+        """Parse manifest TSV content into a dict of key -> (version_id, md5sum, s3_hash, size, source_uri).
+
+        Lightweight parser for conflict detection — does not require full instantiation.
+        """
+        records = {}
+        header_seen = False
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if not header_seen:
+                header_seen = True
+                continue
+            parts = line.split('\t')
+            key = parts[0]
+            if len(parts) >= 6:
+                records[key] = (parts[1], parts[2], parts[3], parts[4], parts[5])
+            else:
+                records[key] = (parts[1], parts[2], "", parts[3], "")
+        return records
+
+    def _record_to_tuple(self, record):
+        return (record.s3_version_id, record.md5sum, record.s3_hash, str(record.size), record.source_uri)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._save_lock = threading.Lock()
+
+        # Snapshot file content at open time for conflict detection
+        self._fp.seek(0)
+        self._last_known_content = self._fp.read()
+        self._fp.seek(0)
 
         # Upgrade v2 header to v3 if needed
         if len(self.header) < len(self.default_header()):
@@ -1253,20 +1285,25 @@ class DataManifestWriter(DataManifest):
             ofstream.write("\t".join(row) + "\n")
 
     def _save_to_disk(self):
-        """Save the current data to disk atomically.
+        """Save the current data to disk atomically with conflict detection.
 
-        Writes to a temp file in the same directory, then renames over the
-        manifest. os.rename is atomic on POSIX when src and dst are on the
-        same filesystem, so the manifest is never in a partially-written state.
+        1. Write new content to a temp file
+        2. Backup current manifest to .bak.{timestamp}
+        3. Atomic rename temp -> manifest
+        4. Verify backup: check if another writer modified the file since we
+           last read it. If so, rename backup to .CONFLICT.{timestamp} and raise.
+        5. If clean, delete the backup.
         """
         dir_name = os.path.dirname(os.path.abspath(self.fname))
+        timestamp = int(time.time())
+        bak_path = f"{self.fname}.bak.{timestamp}"
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as tmp_fp:
                 self.write_tsv(tmp_fp)
                 tmp_fp.flush()
                 os.fsync(tmp_fp.fileno())
-            shutil.copy2(self.fname, self.fname + ".bak")
+            shutil.copy2(self.fname, bak_path)
             os.rename(tmp_path, self.fname)
         except Exception:
             try:
@@ -1274,9 +1311,67 @@ class DataManifestWriter(DataManifest):
             except OSError:
                 pass
             raise
+
         # Reopen the renamed file for future writes
         self._fp.close()
         self._fp = open(self.fname, "r+")
+
+        # Conflict detection: compare backup against last known state
+        with open(bak_path) as f:
+            bak_content = f.read()
+
+        if bak_content != self._last_known_content:
+            conflicts = self._detect_conflicts(bak_content)
+            if conflicts:
+                conflict_path = f"{self.fname}.CONFLICT.{timestamp}"
+                os.rename(bak_path, conflict_path)
+                raise RuntimeError(
+                    f"CONFLICT DETECTED: Another writer modified '{self.fname}' "
+                    f"while this DataManifestWriter held it open.\n"
+                    f"The other writer's version has been saved to:\n"
+                    f"  {conflict_path}\n"
+                    f"Your changes have been written to the manifest, but the "
+                    f"following data from the other writer may have been lost:\n"
+                    + "\n".join(f"  - {c}" for c in conflicts)
+                )
+
+        # No conflicts — delete the backup
+        os.unlink(bak_path)
+
+        # Update last known content from in-memory state (not disk, to avoid race)
+        sio = io.StringIO()
+        self.write_tsv(sio)
+        self._last_known_content = sio.getvalue()
+
+    def _detect_conflicts(self, bak_content):
+        """Compare backup content against our state to find lost data.
+
+        Returns a list of conflict descriptions, or empty list if clean.
+        """
+        bak_records = self._parse_manifest_records(bak_content)
+        orig_records = self._parse_manifest_records(self._last_known_content)
+        current_keys = set(self._data.keys())
+        conflicts = []
+
+        for key, bak_rec in bak_records.items():
+            if key not in current_keys:
+                # Key is in backup but not in our data
+                if key not in orig_records:
+                    # We never had it — another writer added it, we're losing it
+                    conflicts.append(f"Key '{key}' was added by another writer and would be lost")
+                # else: was in original and we deleted it — expected
+            else:
+                # Key exists in both backup and our data
+                our_rec = self._record_to_tuple(self._data[key])
+                orig_rec = orig_records.get(key)
+                if bak_rec != orig_rec:
+                    # Another writer modified this record
+                    if our_rec != orig_rec:
+                        conflicts.append(f"Key '{key}' was modified by both this writer and another writer")
+                    else:
+                        conflicts.append(f"Key '{key}' was modified by another writer and that change would be reverted")
+
+        return conflicts
 
     def _copy_local_file_to_local_cache(self, key, fname):
         """Copy a file into the local cache (to avoid downloading from s3 after an add or update, for example)"""

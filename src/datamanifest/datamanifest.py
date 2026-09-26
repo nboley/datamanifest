@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 from pathlib import Path
-from contextlib import contextmanager
 import io
 import string
 import tempfile
@@ -38,20 +37,6 @@ def random_string(length):
     return "".join(
         [random.choice(string.ascii_letters + string.digits) for n in range(length)]
     )
-
-
-@contextmanager
-def environment_variables(**kwargs):
-    old_env_vars = {key: os.environ.get(key) for key in kwargs if key in os.environ}
-    os.environ.update(kwargs)
-    try:
-        yield
-    finally:
-        # delete all of the new env variables
-        for key in kwargs:
-            del os.environ[key]
-        # re-add the old variables
-        os.environ.update(old_env_vars)
 
 
 def _check_s3_versioning_enabled(bucket_name: str) -> bool:
@@ -113,12 +98,17 @@ class InvalidPrefix(ValueError):
     pass
 
 
-def calc_md5sum_from_fname(fname):
+def _stream_md5(readable):
+    """Compute MD5 hex digest by reading in chunks."""
     md5 = hashlib.md5()
-    with open(fname, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            md5.update(chunk)
+    for chunk in iter(lambda: readable.read(8192), b""):
+        md5.update(chunk)
     return md5.hexdigest()
+
+
+def calc_md5sum_from_fname(fname):
+    with open(fname, "rb") as f:
+        return _stream_md5(f)
 
 
 def calc_md5sum_from_remote_uri(remote_path):
@@ -127,7 +117,8 @@ def calc_md5sum_from_remote_uri(remote_path):
     Args:
         remote_path: RemotePath object with scheme, bucket, path, and version_id
     """
-    assert isinstance(remote_path, RemotePath)
+    if not isinstance(remote_path, RemotePath):
+        raise TypeError(f"Expected RemotePath, got {type(remote_path)}")
     if remote_path.scheme == "s3":
         if not remote_path.version_id:
             raise ValueError("RemotePath must have a version_id to calculate MD5 from remote")
@@ -136,20 +127,11 @@ def calc_md5sum_from_remote_uri(remote_path):
         remote_object = bucket.Object(remote_path.path)
         with tempfile.NamedTemporaryFile("wb+") as fp:
             remote_object.download_fileobj(fp, ExtraArgs={'VersionId': remote_path.version_id})
-            m = hashlib.md5()
             fp.seek(0)
-            for chunk in iter(lambda: fp.read(8192), b""):
-                m.update(chunk)
-            return m.hexdigest()
+            return _stream_md5(fp)
     elif remote_path.scheme in ("http", "https"):
-        md5 = hashlib.md5()
         with urllib.request.urlopen(remote_path.uri, timeout=300) as resp:
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                md5.update(chunk)
-        return md5.hexdigest()
+            return _stream_md5(resp)
     else:
         raise ValueError(f"Unsupported scheme: {remote_path.scheme}")
 
@@ -161,10 +143,16 @@ def _normalize_http_etag(raw):
     return raw.strip('"')
 
 
-def _get_http_resource_metadata(url, retries=3):
-    """Download an HTTP(S) resource and return metadata.
+def _http_download_with_retry(url, dest_dir=None, desc='download', retries=3):
+    """Download an HTTP(S) resource to a temp file with retry.
 
     Streams GET to a temp file while computing md5. Retries on 5xx/timeout.
+
+    Args:
+        url: HTTP(S) URL to download
+        dest_dir: directory for temp file (None = system temp)
+        desc: progress bar description
+        retries: number of retry attempts
 
     Returns:
         dict with keys: md5sum, size, etag, local_path
@@ -172,19 +160,17 @@ def _get_http_resource_metadata(url, retries=3):
     last_error = None
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url)
-            resp = urllib.request.urlopen(req, timeout=300)
+            resp = urllib.request.urlopen(url, timeout=300)
             content_length = resp.headers.get('Content-Length')
             total = int(content_length) if content_length else None
 
             md5 = hashlib.md5()
             size = 0
-            tmp_fd, tmp_path = tempfile.mkstemp()
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=dest_dir)
             try:
                 with os.fdopen(tmp_fd, 'wb') as tmp_fp:
                     with tqdm(total=total, unit='B', unit_scale=True,
-                              desc=os.path.basename(urlparse(url).path) or 'download',
-                              disable=total is None) as pbar:
+                              desc=desc, disable=total is None) as pbar:
                         while True:
                             chunk = resp.read(8192)
                             if not chunk:
@@ -194,7 +180,6 @@ def _get_http_resource_metadata(url, retries=3):
                             size += len(chunk)
                             pbar.update(len(chunk))
             except Exception:
-                # Clean up temp file on failure
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -229,70 +214,27 @@ def _get_http_resource_metadata(url, retries=3):
 
 
 def _download_http_to_file(url, local_cache_path, record, retries=3):
-    """Download an HTTP resource to local_cache_path with md5 verification.
-
-    Streams to a temp file, verifies md5 matches record.md5sum, then renames.
-    Retries on 5xx/timeout (3 attempts with jittered backoff).
-    """
+    """Download an HTTP resource to local_cache_path with md5 verification."""
     cache_dir = os.path.dirname(local_cache_path)
-    last_error = None
-
-    for attempt in range(retries):
+    meta = _http_download_with_retry(
+        url, dest_dir=cache_dir, desc=os.path.basename(record.key), retries=retries
+    )
+    tmp_path = meta["local_path"]
+    try:
+        if record.md5sum and meta["md5sum"] != record.md5sum:
+            raise FileMismatchError(
+                f"MD5 mismatch for '{record.key}': "
+                f"expected '{record.md5sum}', got '{meta['md5sum']}'. "
+                f"The upstream HTTP resource may have changed."
+            )
+        os.rename(tmp_path, local_cache_path)
+        os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
+    except Exception:
         try:
-            resp = urllib.request.urlopen(url, timeout=300)
-            content_length = resp.headers.get('Content-Length')
-            total = int(content_length) if content_length else None
-
-            md5 = hashlib.md5()
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=cache_dir)
-            try:
-                with os.fdopen(tmp_fd, 'wb') as tmp_fp:
-                    with tqdm(total=total, unit='B', unit_scale=True,
-                              desc=os.path.basename(record.key),
-                              disable=total is None) as pbar:
-                        while True:
-                            chunk = resp.read(8192)
-                            if not chunk:
-                                break
-                            tmp_fp.write(chunk)
-                            md5.update(chunk)
-                            pbar.update(len(chunk))
-
-                computed_md5 = md5.hexdigest()
-                if record.md5sum and computed_md5 != record.md5sum:
-                    os.unlink(tmp_path)
-                    raise FileMismatchError(
-                        f"MD5 mismatch for '{record.key}': "
-                        f"expected '{record.md5sum}', got '{computed_md5}'. "
-                        f"The upstream HTTP resource may have changed."
-                    )
-                os.rename(tmp_path, local_cache_path)
-                os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
-                return
-            except Exception:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-        except urllib.error.HTTPError as e:
-            if e.code >= 500:
-                last_error = e
-                logger.warning(f"HTTP {e.code} downloading {url}, retry {attempt + 1}/{retries}")
-                time.sleep(random.uniform(10, 60))
-                continue
-            raise
-        except urllib.error.URLError as e:
-            if attempt < retries - 1 and isinstance(e.reason, (TimeoutError, OSError)):
-                last_error = e
-                logger.warning(f"Network error downloading {url}: {e}, retry {attempt + 1}/{retries}")
-                time.sleep(random.uniform(10, 60))
-                continue
-            raise
-        except FileMismatchError:
-            raise
-
-    raise last_error
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _validate_prefix(prefix, ErrorClass):
@@ -566,10 +508,9 @@ class DataManifest:
         local_cache_path = self.get_local_cache_path(key)
         logger.info(f"Setting local cache path to '{local_cache_path}'.")
 
-        if not os.path.exists(os.path.dirname(local_cache_path)):
-            os.makedirs(
-                os.path.dirname(local_cache_path), mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
-            )
+        os.makedirs(
+            os.path.dirname(local_cache_path), mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
+        )
 
         # For unversioned external records, verify the remote hasn't been replaced
         if not skip_remote_check:
@@ -1445,9 +1386,6 @@ class DataManifestWriter(DataManifest):
             if key in self:
                 raise KeyAlreadyExistsError(f"'{key}' is duplicated in '{self.fname}'")
 
-        with open(fname_to_add) as _:  # noqa
-            pass
-
         # add the data record into the object (version_id will be set after upload)
         self._data[key] = self._build_new_data_manifest_record(key, fname_to_add, notes)
         # Add the file to the remote datastore and get the version ID
@@ -1461,7 +1399,6 @@ class DataManifestWriter(DataManifest):
         if is_update:
             # remove the symlink for the old file
             os.unlink(old_local_path)
-        # TODO consider copying the local file rather than pulling from s3
         # Link the file from the local cache to the local datastore
         self._update_local_checkout(key)
         # update the data manifest on disk
@@ -1547,7 +1484,9 @@ class DataManifestWriter(DataManifest):
 
         elif parsed.scheme in ("http", "https"):
             _validate_tsv_safe(uri, "source_uri")
-            meta = _get_http_resource_metadata(uri)
+            meta = _http_download_with_retry(
+                uri, desc=os.path.basename(urlparse(uri).path) or key
+            )
             try:
                 record = DataManifestRecord(
                     key=key,

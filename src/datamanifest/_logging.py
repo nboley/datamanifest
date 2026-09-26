@@ -71,7 +71,6 @@ class FileDescriptorLogger(int):
                 line = ""
             else:
                 line += char
-        assert False, "Unreachable"
 
     @staticmethod
     def write_data_to_logger(reader, logger, level, return_when_empty):

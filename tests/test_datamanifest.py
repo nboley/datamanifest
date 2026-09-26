@@ -25,10 +25,23 @@ from datamanifest.datamanifest import (
     validate_key,
     DEFAULT_FOLDER_PERMISSIONS,
     random_string,
-    environment_variables,
     _check_s3_versioning_enabled,
     MANIFEST_VERSION,
 )
+
+from contextlib import contextmanager
+
+@contextmanager
+def environment_variables(**kwargs):
+    old_env_vars = {key: os.environ.get(key) for key in kwargs if key in os.environ}
+    os.environ.update(kwargs)
+    try:
+        yield
+    finally:
+        for key in kwargs:
+            del os.environ[key]
+        os.environ.update(old_env_vars)
+
 
 def _find_current_git_hash():
     try:
@@ -2214,7 +2227,7 @@ import io
 from unittest.mock import patch, MagicMock
 
 from datamanifest.datamanifest import (
-    _get_http_resource_metadata,
+    _http_download_with_retry,
     _download_http_to_file,
     _normalize_http_etag,
     FileMismatchError as _FM,
@@ -2523,7 +2536,7 @@ def test_http_download_retry_on_5xx(mock_urlopen, cleandir):
     mock_urlopen.side_effect = [error_500, error_500, success_resp]
 
     with patch("datamanifest.datamanifest.time.sleep"):
-        result = _get_http_resource_metadata("https://example.com/retry.txt", retries=3)
+        result = _http_download_with_retry("https://example.com/retry.txt", retries=3)
 
     assert result["md5sum"] == hashlib.md5(content).hexdigest()
     assert result["size"] == len(content)
@@ -2538,7 +2551,7 @@ def test_http_download_network_error(mock_urlopen):
     mock_urlopen.side_effect = urllib.error.URLError("Name or service not known")
 
     with pytest.raises(urllib.error.URLError):
-        _get_http_resource_metadata("https://nonexistent.example.com/file.txt", retries=1)
+        _http_download_with_retry("https://nonexistent.example.com/file.txt", retries=1)
 
 
 def test_remote_path_accepts_http():

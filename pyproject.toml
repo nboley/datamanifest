@@ -4,10 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "datamanifest"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
   "boto3",
-  "lockfile",
   "tqdm",
 ]
 requires-python = ">=3.6"

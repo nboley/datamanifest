@@ -8,7 +8,6 @@ import dataclasses
 import fcntl
 import fnmatch
 import hashlib
-import lockfile
 import logging
 import os
 import re
@@ -577,90 +576,67 @@ class DataManifest:
         local_cache_path = self.get_local_cache_path(key)
         logger.info(f"Setting local cache path to '{local_cache_path}'.")
 
-        # occasionally there are dangling lock files, delete them if they are more than 30 minutes old to prevent
-        # dead locks
-        if os.path.exists(local_cache_path + ".lock.lock"):
-            try:
-                mins_since_last_modified = (
-                    time.time() - os.stat(local_cache_path + ".lock.lock").st_mtime
-                ) / 60
-            except FileNotFoundError:
-                # this happens when the lock file exists, but was cleaned up before we can run os.stat on it
-                mins_since_last_modified = 0
-
-            if mins_since_last_modified > 30:
-                logger.warning(
-                    f"{local_cache_path}.lock is older than 30 minutes, deleting!"
-                )
-                os.unlink(local_cache_path + ".lock.lock")
-
-        # take out a lockfile to prevent multiple processes from accessing this
-        # file at the same time
-        # ensure that the path exists for the lockfile to be created
         if not os.path.exists(os.path.dirname(local_cache_path)):
-            # otherwise, if we created this, then ensure that the group is correctly set
             os.makedirs(
                 os.path.dirname(local_cache_path), mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
             )
 
-        lock = lockfile.LockFile(local_cache_path + ".lock")
-        with lock:
-            # For unversioned external records, verify the remote hasn't been replaced
-            if not skip_remote_check:
-                self._check_remote_etag(key)
+        # For unversioned external records, verify the remote hasn't been replaced
+        if not skip_remote_check:
+            self._check_remote_etag(key)
 
-            # if local_path already exists and no ETag drift, validate cached file
-            if os.path.exists(local_cache_path) and key not in self._etag_drift_keys:
-                logger.debug(
-                    f"'{key}' already exists in the local cache -- validating that it matches the manifest."
+        # if local_path already exists and no ETag drift, validate cached file
+        if os.path.exists(local_cache_path) and key not in self._etag_drift_keys:
+            logger.debug(
+                f"'{key}' already exists in the local cache -- validating that it matches the manifest."
+            )
+            self._verify_record_matches_file(
+                self._data[key], local_cache_path, check_md5sum=not fast
+            )
+        else:
+            record = self._data[key]
+            if record.remote_uri.scheme in ("http", "https"):
+                _download_http_to_file(
+                    record.source_uri, local_cache_path, record, retries=retries
                 )
-                self._verify_record_matches_file(
-                    self._data[key], local_cache_path, check_md5sum=not fast
-                )
-            else:
-                record = self._data[key]
-                if record.remote_uri.scheme in ("http", "https"):
-                    _download_http_to_file(
-                        record.source_uri, local_cache_path, record, retries=retries
+                self._etag_drift_keys.discard(key)
+            elif record.remote_uri.scheme == "s3":
+                # download the file from S3 (using version ID)
+                s3 = boto3.resource("s3")
+                bucket = s3.Bucket(record.remote_uri.bucket)
+                remote_key = record.remote_uri.path
+                version_id = record.s3_version_id
+                logger.info(f"Downloading '{remote_key}' (version: {version_id})")
+                remote_object = bucket.Object(remote_key)
+                if os.path.exists(local_cache_path):
+                    raise RuntimeError(
+                        f"local_cache_path '{local_cache_path}' already exists (this is unexpected)"
                     )
-                    self._etag_drift_keys.discard(key)
-                elif record.remote_uri.scheme == "s3":
-                    # download the file from S3 (using version ID)
-                    s3 = boto3.resource("s3")
-                    bucket = s3.Bucket(record.remote_uri.bucket)
-                    remote_key = record.remote_uri.path
-                    version_id = record.s3_version_id
-                    logger.info(f"Downloading '{remote_key}' (version: {version_id})")
-                    remote_object = bucket.Object(remote_key)
-                    if os.path.exists(local_cache_path):
-                        raise RuntimeError(
-                            f"local_cache_path '{local_cache_path}' already exists (this is unexpected)"
+                extra_args = {'VersionId': version_id} if version_id else {}
+                downloaded = False
+                for rr in range(retries):
+                    try:
+                        remote_object.download_file(
+                            str(local_cache_path),
+                            ExtraArgs=extra_args
                         )
-                    extra_args = {'VersionId': version_id} if version_id else {}
-                    downloaded = False
-                    for rr in range(retries):
-                        try:
-                            remote_object.download_file(
-                                str(local_cache_path),
-                                ExtraArgs=extra_args
-                            )
-                            downloaded = True
-                            break
-                        except botocore.exceptions.ResponseStreamingError:
-                            logger.error(
-                                f"Error downloading '{remote_key}' to '{local_cache_path}'"
-                                f"Retrying with retry number {rr+1} after a word from our sponsor..."
-                            )
-                            time.sleep(random.uniform(10, 60))
+                        downloaded = True
+                        break
+                    except botocore.exceptions.ResponseStreamingError:
+                        logger.error(
+                            f"Error downloading '{remote_key}' to '{local_cache_path}'"
+                            f"Retrying with retry number {rr+1} after a word from our sponsor..."
+                        )
+                        time.sleep(random.uniform(10, 60))
 
-                    if not downloaded:
-                        raise RuntimeError(
-                            f"Failed to download '{remote_key}' after {retries} retries"
-                        )
-                    # set the permissions and group
-                    os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
-                else:
-                    raise ValueError(f"Unsupported scheme: {record.remote_uri.scheme}")
+                if not downloaded:
+                    raise RuntimeError(
+                        f"Failed to download '{remote_key}' after {retries} retries"
+                    )
+                # set the permissions and group
+                os.chmod(local_cache_path, DEFAULT_FILE_PERMISSIONS)
+            else:
+                raise ValueError(f"Unsupported scheme: {record.remote_uri.scheme}")
 
     def _update_local_checkout(self, key):
         """Create symlink in the local checkout to the local cache"""
@@ -741,7 +717,6 @@ class DataManifest:
         return
 
     def close(self):
-        fcntl.flock(self._fp, fcntl.LOCK_UN)
         self._fp.close()
 
     @staticmethod
@@ -915,18 +890,8 @@ class DataManifest:
         :param checkout_prefix: Path where files are located, e.g., /home/uname/projects/Ravel/data
         """
 
-        # first open the manifest file and take out a lock
         self.fname = manifest_fname
-
-        # open the manifest file, and take out a non-blocking shared lock. This guarantees that a
-        # writer can't open the same file until this file is released (but other readers can)
         self._fp = open(manifest_fname, "r")
-        try:
-            fcntl.flock(self._fp, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError(
-                f"'{self.fname}' has an exclusive lock from another process and so it can't be opened for reading"
-            )
 
         assert os.path.isfile(self.fname)
 
@@ -1082,17 +1047,15 @@ class DataManifest:
         # if the file doesn't exist, then add it
         path = self._data[key].path
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        lock = lockfile.LockFile(path + ".sync.lock")
-        with lock:
-            if not os.path.exists(path):
-                self._update_local_cache(key, fast=fast, skip_remote_check=skip_remote_check)
-                self._update_local_checkout(key)
-            # if it does exist, verify that it matches the manifest
-            else:
-                # For already-synced external records, still check remote ETag for drift
-                if not skip_remote_check:
-                    self._check_remote_etag(key)
-                self.validate_record(key, check_md5sum=(not fast))
+        if not os.path.exists(path):
+            self._update_local_cache(key, fast=fast, skip_remote_check=skip_remote_check)
+            self._update_local_checkout(key)
+        # if it does exist, verify that it matches the manifest
+        else:
+            # For already-synced external records, still check remote ETag for drift
+            if not skip_remote_check:
+                self._check_remote_etag(key)
+            self.validate_record(key, check_md5sum=(not fast))
         return self._data[key]
 
     def sync(self, fast=False, progress_bar=False, skip_remote_check=False):
@@ -1125,17 +1088,9 @@ class DataManifestWriter(DataManifest):
         if len(self.header) < len(self.default_header()):
             self.header = self.default_header()
 
-        # open a non-blocking exclusive lock. This prevents any other process from reading or writing
-        # this data manifest until we've closed the writer.
-        fcntl.flock(self._fp, fcntl.LOCK_UN)
+        # Reopen in read-write mode for _save_to_disk
         self._fp.close()
         self._fp = open(self.fname, "r+")
-        try:
-            fcntl.flock(self._fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError(
-                f"'{self.fname}' has been opened by another process, and so it can't be opened for writing"
-            )
 
     def sync_record(self, key, fast=False, skip_remote_check=False):
         """Sync a record with md5sum backfill for external records.
@@ -1308,27 +1263,31 @@ class DataManifestWriter(DataManifest):
 
     def _save_to_disk(self):
         """Save the current data to disk."""
-        # truncate the file, and re-write it
-        self._fp.seek(0)
-        backup = self._fp.read()
+        fcntl.flock(self._fp, fcntl.LOCK_EX)
         try:
+            # truncate the file, and re-write it
             self._fp.seek(0)
-            self._fp.truncate()
-            self.write_tsv(self._fp)
-            self._fp.flush()
-            os.fsync(self._fp)
-        except Exception as inst:
-            logger.error(
-                "Exception raised during '_save_to_disk'. \n"
-                "Attempting to restore original file, but data manifest may be corrupted. \n"
-                "{}".format(inst)
-            )
-            self._fp.seek(0)
-            self._fp.truncate()
-            self._fp.write(backup)
-            self._fp.flush()
-            os.fsync(self._fp)
-            raise
+            backup = self._fp.read()
+            try:
+                self._fp.seek(0)
+                self._fp.truncate()
+                self.write_tsv(self._fp)
+                self._fp.flush()
+                os.fsync(self._fp)
+            except Exception as inst:
+                logger.error(
+                    "Exception raised during '_save_to_disk'. \n"
+                    "Attempting to restore original file, but data manifest may be corrupted. \n"
+                    "{}".format(inst)
+                )
+                self._fp.seek(0)
+                self._fp.truncate()
+                self._fp.write(backup)
+                self._fp.flush()
+                os.fsync(self._fp)
+                raise
+        finally:
+            fcntl.flock(self._fp, fcntl.LOCK_UN)
 
     def _copy_local_file_to_local_cache(self, key, fname):
         """Copy a file into the local cache (to avoid downloading from s3 after an add or update, for example)"""

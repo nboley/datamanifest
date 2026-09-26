@@ -6,7 +6,7 @@ A lightweight Python tool and library for storing and versioning collections of 
 
 - Provide a simple, file-tree-based interface to versioned data collections
 - Enable fast checkouts via a shared local cache with symlink-based checkout directories
-- Ensure data safety through file-system locks (`fcntl` + `lockfile`), MD5 verification, and S3 versioning
+- Ensure data safety through MD5 verification and S3 versioning
 - Support multiple concurrent checkouts sharing the same cache (e.g., Docker containers with a shared mount)
 
 ## Repository Layout
@@ -39,11 +39,6 @@ Each manifest consists of two files:
 - **Local cache** — files named `{md5sum}-{filename}` for deduplication across versions. Multiple checkouts share this.
 - **Checkout directory** — symlinks into the local cache, providing a normal-looking file tree.
 
-### Locking
-- `DataManifest` (reader) takes a shared `fcntl` lock — multiple readers allowed, no writer.
-- `DataManifestWriter` upgrades to an exclusive `fcntl` lock — blocks all other access.
-- `lockfile.LockFile` used for cache file downloads and sync operations.
-
 ### Classes
 - **`DataManifest`** — read-only access: sync, validate, get, glob, iterate records.
 - **`DataManifestWriter(DataManifest)`** — read-write: add, update, delete files; uploads to S3; rewrites manifest TSV on each mutation.
@@ -60,7 +55,7 @@ Global flags (`--verbose`, `--quiet`, `--debug`) must appear before the subcomma
 
 ## Dependencies
 
-Runtime: `boto3`, `lockfile`, `tqdm`
+Runtime: `boto3`, `tqdm`
 Test: `pytest`
 Python: >= 3.6
 

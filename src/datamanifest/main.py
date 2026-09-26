@@ -130,10 +130,6 @@ def add_url_main(manifest_fname, key, url, notes=""):
 
 def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
     # Check if any external records need md5sum backfill — requires writer access.
-    # Note: there is a small TOCTOU window between this check and opening the
-    # writer/reader below. If a concurrent process adds an external record with
-    # empty md5sum in that window, we may open a reader and skip backfill — the
-    # next sync will catch it.
     with DataManifest(manifest_fname) as dm_reader:
         needs_writer = any(
             record.is_external and not record.md5sum

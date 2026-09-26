@@ -266,7 +266,7 @@ Unlike S3 versioned buckets, HTTP URLs can serve different content at any time. 
 
 ### New dependency
 
-Would require adding `requests` to dependencies (currently only `boto3`, `tqdm`, `lockfile` are used for network operations). Alternatively, use `urllib.request` from stdlib to avoid adding a dependency.
+Would require adding `requests` to dependencies (currently only `boto3`, `tqdm` are used for network operations). Alternatively, use `urllib.request` from stdlib to avoid adding a dependency.
 
 ---
 

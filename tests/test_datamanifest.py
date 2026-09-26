@@ -372,34 +372,6 @@ def test_add_duplicate_key(manifest_fname):
             manifest.add(test_key, test_path)
 
 
-def test_locking_works(manifest_fname):
-    """Make sure that we get an error if two people try to modify the same manifest concurrently.
-
-    We want to make sure that two people don't modify the same manifest, thus overriding someone
-    elses changes. In this test, we open two manifests, write different files, and then make sure
-    that we get a real error.
-    """
-    payload = b"A" * 12
-    test_key = "test_data.txt"
-    test_path = os.path.abspath(test_key)
-    with open(test_path, "wb") as ofp:
-        ofp.write(payload)
-
-    manifest_w1 = DataManifestWriter(manifest_fname)
-    with pytest.raises(
-        RuntimeError, match=r".*?and so it can't be opened for reading.*"
-    ):
-        DataManifest(manifest_fname)
-    manifest_w1.close()
-
-    manifest_r2 = DataManifest(manifest_fname)
-    with pytest.raises(
-        RuntimeError, match=r".*?and so it can't be opened for writing.*"
-    ):
-        DataManifestWriter(manifest_fname)
-    manifest_r2.close()
-
-
 @pytest.mark.parametrize("delete_from_datastore", [True, False])
 def test_delete_record(manifest_fname, delete_from_datastore):
     with DataManifestWriter(manifest_fname) as manifest:

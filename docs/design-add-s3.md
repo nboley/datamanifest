@@ -1091,6 +1091,6 @@ After backfill, subsequent `validate` calls (even with `check_md5sum=True`) will
 
 ### Design considerations
 
-- **Reader vs writer for sync:** Currently `sync_main` uses `DataManifest` (reader). The md5sum backfill requires write access. Options: (a) upgrade `sync_main` to use `DataManifestWriter` when external records with empty `md5sum` are present, (b) add a `backfill_md5sum` post-sync command, (c) accept that md5sum backfill is best-effort and only happens when opened via writer. Option (a) is cleanest but changes the locking behavior of sync.
+- **Reader vs writer for sync:** Currently `sync_main` uses `DataManifest` (reader). The md5sum backfill requires write access. Options: (a) upgrade `sync_main` to use `DataManifestWriter` when external records with empty `md5sum` are present, (b) add a `backfill_md5sum` post-sync command, (c) accept that md5sum backfill is best-effort and only happens when opened via writer. Option (a) is cleanest.
 - **Cost:** The `head_object` pre-check adds one API call per external record per sync. For manifests with many external records, this could be noticeable. Consider making it opt-out (`sync --skip-remote-check`) rather than opt-in.
 - **Idempotency:** Once `md5sum` is backfilled, subsequent syncs skip the computation. The backfill is a one-time cost per external record.

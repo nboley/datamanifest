@@ -69,7 +69,7 @@ No change — `urllib.request` is stdlib. No new dependencies.
 
 **Decision:** Use stdlib `urllib.request` exclusively. Do not add `requests` or `httpx` as a dependency.
 
-**Rationale:** The requirements document explicitly mandates this: "no new dependencies — must use stdlib `urllib.request`". The current dependency list (`boto3`, `lockfile`, `tqdm`) is minimal by design, and the package must work in constrained environments (containers, AWS Batch) where installing extra packages is costly. `urllib.request` provides everything needed: `urlopen()` for streaming GET, `Request` for HEAD with custom headers, redirect following (enabled by default via `HTTPRedirectHandler`), and access to response headers for `Content-Length` and `ETag`.
+**Rationale:** The requirements document explicitly mandates this: "no new dependencies — must use stdlib `urllib.request`". The current dependency list (`boto3`, `tqdm`) is minimal by design, and the package must work in constrained environments (containers, AWS Batch) where installing extra packages is costly. `urllib.request` provides everything needed: `urlopen()` for streaming GET, `Request` for HEAD with custom headers, redirect following (enabled by default via `HTTPRedirectHandler`), and access to response headers for `Content-Length` and `ETag`.
 
 **Implementation notes:**
 - Streaming downloads: `urllib.request.urlopen(url)` returns a file-like object supporting `.read(chunk_size)`.

@@ -1080,13 +1080,15 @@ class DataManifestWriter(DataManifest):
         records = {}
         header_seen = False
         for line in content.splitlines():
-            line = line.strip()
-            if not line or line.startswith('#'):
+            line = line.strip('\n\r')
+            if not line.strip() or line.startswith('#'):
                 continue
             if not header_seen:
                 header_seen = True
                 continue
             parts = line.split('\t')
+            if len(parts) < 4:
+                continue
             key = parts[0]
             if len(parts) >= 6:
                 records[key] = (parts[1], parts[2], parts[3], parts[4], parts[5])
@@ -1096,6 +1098,9 @@ class DataManifestWriter(DataManifest):
 
     def _record_to_tuple(self, record):
         return (record.s3_version_id, record.md5sum, record.s3_hash, str(record.size), record.source_uri)
+
+    _save_counter = 0
+    _save_counter_lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1125,9 +1130,8 @@ class DataManifestWriter(DataManifest):
             local_cache_path = self.get_local_cache_path(key)
             if os.path.exists(local_cache_path):
                 computed_md5 = calc_md5sum_from_fname(local_cache_path)
-                with self._save_lock:
-                    self._data[key] = dataclasses.replace(record, md5sum=computed_md5)
-                    self._save_to_disk()
+                self._data[key] = dataclasses.replace(record, md5sum=computed_md5)
+                self._save_to_disk()
                 logger.info(f"Backfilled md5sum '{computed_md5}' for external record '{key}'")
         return self._data[key]
 
@@ -1287,16 +1291,26 @@ class DataManifestWriter(DataManifest):
     def _save_to_disk(self):
         """Save the current data to disk atomically with conflict detection.
 
+        Thread-safe: acquires _save_lock internally.
+
         1. Write new content to a temp file
-        2. Backup current manifest to .bak.{timestamp}
+        2. Backup current manifest to .bak.{unique_id}
         3. Atomic rename temp -> manifest
         4. Verify backup: check if another writer modified the file since we
-           last read it. If so, rename backup to .CONFLICT.{timestamp} and raise.
+           last read it. If so, rename backup to .CONFLICT.{unique_id} and raise.
         5. If clean, delete the backup.
         """
+        with self._save_lock:
+            self._save_to_disk_unlocked()
+
+    def _save_to_disk_unlocked(self):
+        """Internal save implementation. Must be called with _save_lock held."""
         dir_name = os.path.dirname(os.path.abspath(self.fname))
-        timestamp = int(time.time())
-        bak_path = f"{self.fname}.bak.{timestamp}"
+        with DataManifestWriter._save_counter_lock:
+            DataManifestWriter._save_counter += 1
+            counter = DataManifestWriter._save_counter
+        unique_id = f"{int(time.time())}_{os.getpid()}_{counter}"
+        bak_path = f"{self.fname}.bak.{unique_id}"
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as tmp_fp:
@@ -1323,7 +1337,7 @@ class DataManifestWriter(DataManifest):
         if bak_content != self._last_known_content:
             conflicts = self._detect_conflicts(bak_content)
             if conflicts:
-                conflict_path = f"{self.fname}.CONFLICT.{timestamp}"
+                conflict_path = f"{self.fname}.CONFLICT.{unique_id}"
                 os.rename(bak_path, conflict_path)
                 raise RuntimeError(
                     f"CONFLICT DETECTED: Another writer modified '{self.fname}' "
@@ -1345,6 +1359,11 @@ class DataManifestWriter(DataManifest):
 
     def _detect_conflicts(self, bak_content):
         """Compare backup content against our state to find lost data.
+
+        Checks both directions:
+        - Keys in backup but not in our data (other writer added them)
+        - Keys in original but not in backup (other writer deleted them)
+        - Keys modified by other writer vs. our modifications
 
         Returns a list of conflict descriptions, or empty list if clean.
         """
@@ -1370,6 +1389,16 @@ class DataManifestWriter(DataManifest):
                         conflicts.append(f"Key '{key}' was modified by both this writer and another writer")
                     else:
                         conflicts.append(f"Key '{key}' was modified by another writer and that change would be reverted")
+
+        # Reverse check: keys that were in the original but deleted by another writer
+        for key in orig_records:
+            if key not in bak_records and key in current_keys:
+                # Another writer deleted this key, but we still have it — our save would revert that delete
+                our_rec = self._record_to_tuple(self._data[key])
+                orig_rec = orig_records[key]
+                if our_rec == orig_rec:
+                    # We didn't modify it, so the other writer's delete is being silently reverted
+                    conflicts.append(f"Key '{key}' was deleted by another writer and that deletion would be reverted")
 
         return conflicts
 

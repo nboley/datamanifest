@@ -1,6 +1,8 @@
 import time
 import random
+import threading
 from typing import Optional, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 import botocore
 import dataclasses
@@ -1028,14 +1030,33 @@ class DataManifest:
             self.validate_record(key, check_md5sum=(not fast))
         return self._data[key]
 
-    def sync(self, fast=False, progress_bar=False, skip_remote_check=False):
+    def sync(self, fast=False, progress_bar=False, skip_remote_check=False, max_workers=8):
         """Sync the data manifest.
 
         If fast is set to True, then skip the md5sum check.
         If skip_remote_check is True, skip the remote ETag verification for external records.
+        If max_workers > 1, sync records in parallel using a thread pool.
         """
-        for key in tqdm(self.keys(), disable=not progress_bar):
-            self.sync_record(key, fast=fast, skip_remote_check=skip_remote_check)
+        keys = list(self.keys())
+        errors = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.sync_record, key, fast=fast, skip_remote_check=skip_remote_check): key
+                for key in keys
+            }
+            with tqdm(total=len(keys), disable=not progress_bar) as pbar:
+                for future in as_completed(futures):
+                    key = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        errors.append((key, e))
+                    pbar.update(1)
+        if errors:
+            error_details = "\n".join(f"  {key}: {type(e).__name__}: {e}" for key, e in errors)
+            raise RuntimeError(
+                f"Failed to sync {len(errors)} record(s):\n{error_details}"
+            )
 
     def validate(self, fast=False):
         for key in self.keys():
@@ -1051,6 +1072,7 @@ class DataManifest:
 class DataManifestWriter(DataManifest):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._save_lock = threading.Lock()
 
         # Upgrade v2 header to v3 if needed
         if len(self.header) < len(self.default_header()):
@@ -1071,8 +1093,9 @@ class DataManifestWriter(DataManifest):
             local_cache_path = self.get_local_cache_path(key)
             if os.path.exists(local_cache_path):
                 computed_md5 = calc_md5sum_from_fname(local_cache_path)
-                self._data[key] = dataclasses.replace(record, md5sum=computed_md5)
-                self._save_to_disk()
+                with self._save_lock:
+                    self._data[key] = dataclasses.replace(record, md5sum=computed_md5)
+                    self._save_to_disk()
                 logger.info(f"Backfilled md5sum '{computed_md5}' for external record '{key}'")
         return self._data[key]
 
@@ -1243,6 +1266,7 @@ class DataManifestWriter(DataManifest):
                 self.write_tsv(tmp_fp)
                 tmp_fp.flush()
                 os.fsync(tmp_fp.fileno())
+            shutil.copy2(self.fname, self.fname + ".bak")
             os.rename(tmp_path, self.fname)
         except Exception:
             try:

@@ -3,7 +3,6 @@ import random
 from typing import Optional, List
 import boto3
 import botocore
-import codecs
 import dataclasses
 import fcntl
 import fnmatch
@@ -12,7 +11,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from contextlib import contextmanager
 import string
@@ -113,23 +111,12 @@ class InvalidPrefix(ValueError):
     pass
 
 
-def _extract_permissions(path):
-    return int(str(oct(os.stat(path).st_mode))[-4:], base=8)
-
-
-def hex_to_base64(hex_str):
-    return (
-        codecs.encode(codecs.decode(hex_str, "hex"), "base64").strip().decode("ascii")
-    )
-
-
 def calc_md5sum_from_fname(fname):
-    hex_str = (
-        subprocess.run(["md5sum", fname], stdout=subprocess.PIPE, check=True)
-        .stdout.split()[0]
-        .decode("ascii")
-    )
-    return hex_str
+    md5 = hashlib.md5()
+    with open(fname, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            md5.update(chunk)
+    return md5.hexdigest()
 
 
 def calc_md5sum_from_remote_uri(remote_path):
@@ -660,9 +647,11 @@ class DataManifest:
             # remove the symlink if it already exists
             if os.path.islink(local_path):
                 old_local_cache_path = os.readlink(local_path)
-                assert not os.path.islink(
-                    old_local_cache_path
-                ), "We should never have nested links created by the data manifest"
+                if os.path.islink(old_local_cache_path):
+                    raise RuntimeError(
+                        f"Nested symlink detected at '{old_local_cache_path}' — "
+                        "the data manifest should never create nested links"
+                    )
                 if old_local_cache_path != local_cache_path:
                     os.unlink(local_path)
 
@@ -886,14 +875,8 @@ class DataManifest:
         return data
 
     def __init__(self, manifest_fname):
-        """
-        :param checkout_prefix: Path where files are located, e.g., /home/uname/projects/Ravel/data
-        """
-
         self.fname = manifest_fname
         self._fp = open(manifest_fname, "r")
-
-        assert os.path.isfile(self.fname)
 
         # read the header and extract any config values (currently only the remote datastore)
         manifest_config, self.header, header_offset = self._load_header(
@@ -931,8 +914,6 @@ class DataManifest:
         for key, val in keys_and_values.items():
             if "=" in key:
                 raise ValueError(f"config key '{key}' contains a '='")
-            if "=" in val:
-                raise ValueError(f"config value '{val}' contains a '='")
             print(f"{'#' if prepend_hash else ''}{key}={val}", file=ofp)
 
 
@@ -960,16 +941,6 @@ class DataManifest:
             os.makedirs(
                 local_cache_prefix, mode=DEFAULT_FOLDER_PERMISSIONS, exist_ok=True
             )
-            # I don't think that this should be necessary, but I need this for the permissions to be correct
-            # in the docker tests. Looks like there may be a bug with docker mounts.
-            os.chmod(local_cache_prefix, DEFAULT_FOLDER_PERMISSIONS)
-
-        assert os.path.isdir(local_cache_prefix)
-        if _extract_permissions(local_cache_prefix) != DEFAULT_FOLDER_PERMISSIONS:
-            raise ValueError(
-                f"'Permissions of {local_cache_prefix} must be '{DEFAULT_FOLDER_PERMISSIONS}'"
-            )
-
         return local_cache_prefix
 
     @staticmethod
@@ -979,7 +950,6 @@ class DataManifest:
 
         if not os.path.exists(checkout_prefix):
             os.makedirs(checkout_prefix, exist_ok=True)
-        assert os.path.isdir(checkout_prefix)
 
         return checkout_prefix
 
@@ -1064,8 +1034,6 @@ class DataManifest:
         If fast is set to True, then skip the md5sum check.
         If skip_remote_check is True, skip the remote ETag verification for external records.
         """
-        assert fast in [True, False]
-
         for key in tqdm(self.keys(), disable=not progress_bar):
             self.sync_record(key, fast=fast, skip_remote_check=skip_remote_check)
 

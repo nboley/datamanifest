@@ -11,23 +11,25 @@ from datamanifest.datamanifest import (
     random_string,
 )
 
-logger = None
+logger = logging.getLogger(__name__)
 
 def _find_all_files_and_directories(files_and_directories_to_add, dm_fname):
     rv = []
     # strip off the common prefix
     files_and_directories_to_add = [os.path.normpath(x) for x in files_and_directories_to_add]
-    common_prefix = os.path.commonprefix(files_and_directories_to_add) if len(files_and_directories_to_add) > 1 else ''
+    if len(files_and_directories_to_add) > 1:
+        common_prefix = os.path.commonpath(files_and_directories_to_add)
+    else:
+        common_prefix = ''
     for path in files_and_directories_to_add:
         logger.info(f"Adding '{path}' to {dm_fname}")
         if os.path.isfile(path):
-            rv.append((path[len(common_prefix):], path))
+            rv.append((os.path.relpath(path, common_prefix) if common_prefix else path, path))
         elif os.path.isdir(path):
             for root, _, fnames in os.walk(path):
                 for fname in fnames:
-                    # we add 1 to the common prefix length to strip off the '/'
-                    key = os.path.normpath(os.path.join(root[len(common_prefix):], fname))
                     full_path = os.path.normpath(os.path.abspath(os.path.join(root, fname)))
+                    key = os.path.normpath(os.path.join(os.path.relpath(root, common_prefix) if common_prefix else root, fname))
                     rv.append((key, full_path))
         else:
             raise ValueError(f"Passed file or directory '{path}' does not appear to be a file or directory.")
@@ -57,10 +59,10 @@ def _add_subdirectory(dm, files_and_directories_to_add, resume=False, dry_run=Fa
 
 
 def add_subdirectory_main(manifest_fname, directory_to_add, dry_run, resume):
-    dm = DataManifestWriter(manifest_fname)
-    _add_subdirectory(
-        dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
-    )
+    with DataManifestWriter(manifest_fname) as dm:
+        _add_subdirectory(
+            dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
+        )
 
 
 def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, remote_datastore_uri, dry_run, resume):
@@ -78,7 +80,7 @@ def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, 
         _add_subdirectory(
             dm, directory_to_add, dry_run=dry_run, include_base_dir_in_key=False, resume=resume,
         )
-    except:
+    except Exception:
         if os.path.exists(tmp_manifest_fname):
             os.remove(tmp_manifest_fname)
         if os.path.exists(DataManifestWriter.local_config_path(tmp_manifest_fname)):
@@ -94,17 +96,16 @@ def create_new_manifest_main(manifest_fname, directory_to_add, checkout_prefix, 
 
 
 def add_main(manifest_fname, key, path, notes):
-    dm = DataManifestWriter(manifest_fname)
-    dm.add(key, path, notes=notes)
+    with DataManifestWriter(manifest_fname) as dm:
+        dm.add(key, path, notes=notes)
 
 
 def update_main(manifest_fname, key, path, notes):
-    dm = DataManifestWriter(manifest_fname)
-    dm.update(key, path, notes=notes)
+    with DataManifestWriter(manifest_fname) as dm:
+        dm.update(key, path, notes=notes)
 
 
 def delete_main(manifest_fname, key, delete_from_datastore, force_delete=False):
-    dm = DataManifestWriter(manifest_fname)
     if delete_from_datastore and not force_delete:
         i_am_sure = input(
             f"WARNING: you have chosen to delete '{key}' from the datastore.\n"
@@ -113,19 +114,20 @@ def delete_main(manifest_fname, key, delete_from_datastore, force_delete=False):
         )
         if i_am_sure != "I am sure":
             raise RuntimeError(f"'{i_am_sure}' is different than 'I am sure'")
-    dm.delete(key, delete_from_datastore=delete_from_datastore)
+    with DataManifestWriter(manifest_fname) as dm:
+        dm.delete(key, delete_from_datastore=delete_from_datastore)
 
 
 def add_s3_main(manifest_fname, key, s3_uri, notes=""):
-    dm = DataManifestWriter(manifest_fname)
-    dm.add_external(key, s3_uri, notes=notes)
+    with DataManifestWriter(manifest_fname) as dm:
+        dm.add_external(key, s3_uri, notes=notes)
 
 
 def add_url_main(manifest_fname, key, url, notes=""):
-    dm = DataManifestWriter(manifest_fname)
-    dm.add_external(key, url, notes=notes)
-    record = dm.get(key, validate=False)
-    print(f"Added {key}: md5={record.md5sum} size={record.size} etag={record.s3_hash or '(none)'}")
+    with DataManifestWriter(manifest_fname) as dm:
+        dm.add_external(key, url, notes=notes)
+        record = dm.get(key, validate=False)
+        print(f"Added {key}: md5={record.md5sum} size={record.size} etag={record.s3_hash or '(none)'}")
 
 
 def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
@@ -150,9 +152,9 @@ def checkout_main(manifest_fname, checkout_dir, sync=False, fast=False, progress
             f"Checkout directory '{checkout_dir}' already exists."
             "\nHint: Use sync to update an existing directory."
         )
-    dm = DataManifest.checkout(manifest_fname, checkout_prefix=checkout_dir)
-    if sync:
-        dm.sync(fast=fast, progress_bar=progress_bar)
+    with DataManifest.checkout(manifest_fname, checkout_prefix=checkout_dir) as dm:
+        if sync:
+            dm.sync(fast=fast, progress_bar=progress_bar)
 
 
 def parse_args():

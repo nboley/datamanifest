@@ -57,7 +57,7 @@ Global flags (`--verbose`, `--quiet`, `--debug`) must appear before the subcomma
 
 Runtime: `boto3`, `tqdm`
 Test: `pytest`
-Python: >= 3.6
+Python: >= 3.7
 
 ## Running Tests
 

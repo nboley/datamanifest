@@ -4,7 +4,6 @@ from typing import Optional, List
 import boto3
 import botocore
 import dataclasses
-import fcntl
 import fnmatch
 import hashlib
 import logging
@@ -136,7 +135,8 @@ def calc_md5sum_from_remote_uri(remote_path):
             remote_object.download_fileobj(fp, ExtraArgs={'VersionId': remote_path.version_id})
             m = hashlib.md5()
             fp.seek(0)
-            m.update(fp.read())
+            for chunk in iter(lambda: fp.read(8192), b""):
+                m.update(chunk)
             return m.hexdigest()
     elif remote_path.scheme in ("http", "https"):
         md5 = hashlib.md5()
@@ -1230,32 +1230,29 @@ class DataManifestWriter(DataManifest):
             ofstream.write("\t".join(row) + "\n")
 
     def _save_to_disk(self):
-        """Save the current data to disk."""
-        fcntl.flock(self._fp, fcntl.LOCK_EX)
+        """Save the current data to disk atomically.
+
+        Writes to a temp file in the same directory, then renames over the
+        manifest. os.rename is atomic on POSIX when src and dst are on the
+        same filesystem, so the manifest is never in a partially-written state.
+        """
+        dir_name = os.path.dirname(os.path.abspath(self.fname))
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         try:
-            # truncate the file, and re-write it
-            self._fp.seek(0)
-            backup = self._fp.read()
+            with os.fdopen(fd, "w") as tmp_fp:
+                self.write_tsv(tmp_fp)
+                tmp_fp.flush()
+                os.fsync(tmp_fp.fileno())
+            os.rename(tmp_path, self.fname)
+        except Exception:
             try:
-                self._fp.seek(0)
-                self._fp.truncate()
-                self.write_tsv(self._fp)
-                self._fp.flush()
-                os.fsync(self._fp)
-            except Exception as inst:
-                logger.error(
-                    "Exception raised during '_save_to_disk'. \n"
-                    "Attempting to restore original file, but data manifest may be corrupted. \n"
-                    "{}".format(inst)
-                )
-                self._fp.seek(0)
-                self._fp.truncate()
-                self._fp.write(backup)
-                self._fp.flush()
-                os.fsync(self._fp)
-                raise
-        finally:
-            fcntl.flock(self._fp, fcntl.LOCK_UN)
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        # Reopen the renamed file for future writes
+        self._fp.close()
+        self._fp = open(self.fname, "r+")
 
     def _copy_local_file_to_local_cache(self, key, fname):
         """Copy a file into the local cache (to avoid downloading from s3 after an add or update, for example)"""

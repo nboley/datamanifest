@@ -1,14 +1,12 @@
 """Logger with nice formatting and file & stderr output handlers."""
 import sys
 import logging
+from logging import CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET  # noqa: F401
 from threading import Thread
 import tempfile
 import time
 from io import FileIO, BytesIO
 import argparse
-
-import logging
-from logging import CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET  # noqa: F401
 
 # capture warnings from the warnings module in logging
 logging.captureWarnings(True)

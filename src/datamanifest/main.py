@@ -144,10 +144,13 @@ def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False,
     else:
         dm = DataManifest(manifest_fname)
     with dm:
-        if prefix:
+        # `is not None`, not truthiness: an empty --prefix must reach sync_prefix() and
+        # raise, not fall through to a full sync. Truthiness would make `--prefix ""`
+        # silently sync every record -- failing toward doing more work, not less.
+        if prefix is not None:
             dm.sync_prefix(prefix, fast=fast, progress_bar=progress_bar,
                            skip_remote_check=skip_remote_check)
-        elif glob_pattern:
+        elif glob_pattern is not None:
             dm.sync_glob(glob_pattern, fast=fast, progress_bar=progress_bar,
                          skip_remote_check=skip_remote_check)
         else:

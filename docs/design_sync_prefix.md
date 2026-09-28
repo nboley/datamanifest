@@ -1,8 +1,10 @@
 # Design: Prefix-Scoped Sync for `datamanifest`
 
 **Date:** 2026-09-28
-**Package version:** 1.3.0 (commit `756bc19`, editable install)
-**Status:** PROPOSAL — not implemented
+**Package version:** 1.3.0 — designed against `756bc19`, implemented against `a174183`.
+Both are tagged `v1.3.0`, so the tag does not distinguish them; `a174183` is the one with the
+`max_workers` thread pool in `sync()`.
+**Status:** IMPLEMENTED — `bd1caf2` (feature), `961068a` (call-site fix), `ee5bdaf` (this doc)
 
 ---
 
@@ -865,7 +867,20 @@ sync dispatch on `remote_uri.scheme` at L529/L534.
 
 ### Key Tradeoffs
 - **`keys=` on `sync()` vs. `prefix=`/`pattern=`**: Chose `keys=` for composability — users already have `glob()` and list comprehensions. Convenience methods (`sync_prefix`, `sync_glob`) are sugar. This is the right call: one primitive + two wrappers > two special-purpose parameters.
-- **`*` keyword-only enforcement**: Unbundled into a prior commit for cleaner git history. All 5 known call sites verified keyword-only.
+- **`*` keyword-only enforcement**: NOT unbundled — it lives on the same signature line as
+  `keys=`, so splitting it would need an artificial intermediate commit. It ships inside
+  `bd1caf2`.
+  On call sites, this doc originally claimed "all 5 known call sites verified keyword-only".
+  That count was wrong twice over. The repo actually has **20** `sync()` call sites, and the
+  one the original enumeration missed — `test_datamanifest.py:621`, `dm.sync(fast)` — was the
+  **only positional one in the repo**, so the incomplete audit missed precisely the case that
+  mattered. Fixed in `961068a`.
+  Two lessons worth keeping: enumerate by searching for the *absence* of `kwarg=` rather than
+  listing sites you can think of; and note this was invisible to the test suite because
+  `test_datamanifest.py` is the file we deliberately never run (it writes to the production
+  bucket). A test that cannot be run cannot report that it is broken.
+  All 20 sites are now confirmed keyword-only. Downstream repos were checked separately:
+  0 positional callers in `biomarker-projects`, `biomarker`, `fragments_h5`.
 - **Empty-match `ValueError` with `keys=[]` escape hatch**: Well-designed asymmetry — explicit empty list is a conscious no-op, empty glob/prefix match is likely a typo. Documented in the §6 docstring.
 - **Return values**: `sync_prefix`/`sync_glob` return the matched key list. Free (already computed) and useful for callers.
 - **`UnknownKeyError(KeyError)`**: New exception subclass. Up-front set-difference validation before any thread starts.

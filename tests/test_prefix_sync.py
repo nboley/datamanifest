@@ -364,3 +364,56 @@ class TestCLI:
                 parse_args()
             # argparse exits with code 2 for usage errors
             assert exc_info.value.code == 2
+
+    # The tests above call sync_main() directly, which leaves the argparse -> sync_main
+    # wiring untested: a typo in the attribute name (args.glob vs args.glob_pattern)
+    # would pass every one of them. These two drive main() end to end instead.
+    @pytest.mark.parametrize("flag,value,expected_method", [
+        ("--prefix", "alpha/", "sync_prefix"),
+        ("--glob", "*.txt", "sync_glob"),
+    ])
+    def test_main_wires_flag_through_to_the_right_method(
+        self, tmpdir, flag, value, expected_method
+    ):
+        import sys
+        from datamanifest.main import main
+        manifest_path = _create_test_manifest(tmpdir)
+        argv = ["dm", "--quiet", "sync", str(manifest_path), flag, value]
+        with patch.object(sys, 'argv', argv), \
+                patch('datamanifest.main.DataManifest') as MockDM:
+            mock_dm = MagicMock()
+            MockDM.return_value = mock_dm
+            mock_dm.__enter__ = MagicMock(return_value=mock_dm)
+            mock_dm.__exit__ = MagicMock(return_value=False)
+            mock_dm.values.return_value = []
+            main()
+
+        called = getattr(mock_dm, expected_method)
+        called.assert_called_once()
+        assert called.call_args[0][0] == value
+        # and the other two dispatch paths must NOT have fired
+        for other in {"sync_prefix", "sync_glob", "sync"} - {expected_method}:
+            getattr(mock_dm, other).assert_not_called()
+
+    def test_main_empty_prefix_does_not_silently_sync_everything(self, tmpdir):
+        """`--prefix ""` must reach sync_prefix (which raises), not fall through to sync().
+
+        Truthiness dispatch would make an empty prefix sync every record -- failing
+        toward doing MORE work than asked, which is the dangerous direction.
+        """
+        import sys
+        from datamanifest.main import main
+        manifest_path = _create_test_manifest(tmpdir)
+        argv = ["dm", "--quiet", "sync", str(manifest_path), "--prefix", ""]
+        with patch.object(sys, 'argv', argv), \
+                patch('datamanifest.main.DataManifest') as MockDM:
+            mock_dm = MagicMock()
+            MockDM.return_value = mock_dm
+            mock_dm.__enter__ = MagicMock(return_value=mock_dm)
+            mock_dm.__exit__ = MagicMock(return_value=False)
+            mock_dm.values.return_value = []
+            main()
+
+        mock_dm.sync_prefix.assert_called_once()
+        assert mock_dm.sync_prefix.call_args[0][0] == ""
+        mock_dm.sync.assert_not_called()

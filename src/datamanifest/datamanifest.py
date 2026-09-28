@@ -1089,18 +1089,18 @@ class DataManifest:
         for key in self.keys():
             self.validate_record(key, check_md5sum=(not fast))
 
+    # The two key-matching functions are kept adjacent so the contrast between them is
+    # visible at a glance: glob() is fnmatch, find_prefix() is literal startswith.
     def glob(self, pattern):
         return fnmatch.filter(self.keys(), pattern)
-
-    def glob_records(self, pattern, validate=True):
-        return [self.get(k, validate=validate) for k in self.glob(pattern)]
 
     def find_prefix(self, prefix):
         """Return all keys starting with `prefix` (literal str.startswith filter).
 
-        This is NOT equivalent to glob(prefix + "*"). The two are kept separate
-        so that a future change to glob()'s semantics cannot silently alter
-        find_prefix().
+        This is NOT equivalent to glob(prefix + "*"). They happen to return identical
+        results today, because fnmatch's `*` crosses `/` unlike glob.glob — but they are
+        kept separate so that a future change to glob()'s semantics cannot silently alter
+        find_prefix(). Each name means what it says.
 
         Args:
             prefix: Literal prefix string. Must be non-empty.
@@ -1117,6 +1117,9 @@ class DataManifest:
                 "via str.startswith — almost certainly a bug)"
             )
         return [k for k in self.keys() if k.startswith(prefix)]
+
+    def glob_records(self, pattern, validate=True):
+        return [self.get(k, validate=validate) for k in self.glob(pattern)]
 
 
 class DataManifestWriter(DataManifest):

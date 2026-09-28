@@ -618,7 +618,7 @@ def test_rebuild_of_local(manifest_fname, fast):
     os.unlink(local_checkout_path)
 
     with DataManifest(manifest_fname) as dm:
-        dm.sync(fast)
+        dm.sync(fast=fast)
 
 
 def test_get_no_validate(manifest_fname):

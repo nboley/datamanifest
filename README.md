@@ -121,7 +121,11 @@ Note that the files under `test_checkout` are symbolic links to the local cache 
   Size: 52              Blocks: 0          IO Block: 4096   symbolic link
 ```
 
-Files containing the data can be found under the local_cache_prefix. Note that **local cache files have MD5 prefixes** for deduplication:
+Files containing the data can be found under the local_cache_prefix. Note that **local cache
+files are prefixed with a content hash** for deduplication. The prefix is the record's
+`s3_hash` when set, falling back to `md5sum` — not always the md5. `s3_hash` is the S3 ETag,
+which for a multipart upload is *not* an md5, so code that assumes the md5 will look up the
+wrong path for any record where the two differ:
 ```
 > find /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq
 /tmp/DATA_MANIFEST_CACHE_jvHksagknpbD8Cmq
@@ -167,6 +171,51 @@ To sync the newly checkout directory run:
 > dm sync test.data_manifest.tsv
 100%|███████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00, 790.71it/s]
 ```
+
+#### Syncing only part of a manifest
+
+A full `sync` fetches every record, which is often far more than you want — a manifest can
+hold terabytes while the subset you need is a few gigabytes. Restrict it by literal prefix or
+by glob pattern:
+
+```
+> dm sync test.data_manifest.tsv --prefix genome/
+> dm sync test.data_manifest.tsv --glob 'data/*.bam'
+```
+
+`--prefix` and `--glob` are mutually exclusive. Either one matching nothing is an error
+rather than a silent no-op, on the grounds that a pattern matching zero keys is usually a
+typo and silently syncing nothing is the least helpful possible response.
+
+The same thing from Python, with `keys=` as the underlying primitive:
+
+```python
+with DataManifest("test.data_manifest.tsv") as dm:
+    # inspect what would be fetched before fetching it
+    dm.find_prefix("genome/")        # literal str.startswith
+    dm.glob("data/*.bam")            # fnmatch pattern
+
+    # then sync a subset; both return the list of keys they matched
+    dm.sync_prefix("genome/")
+    dm.sync_glob("data/*.bam")
+
+    # or pass an explicit key set
+    dm.sync(keys=["README", "data/small.chr6.bam"])
+```
+
+Notes on the semantics, which are deliberately asymmetric:
+
+- **Unknown keys raise `UnknownKeyError` before anything is downloaded.** The whole key set is
+  checked against the manifest up front, so a typo transfers zero bytes rather than failing
+  part-way through. `UnknownKeyError` subclasses `KeyError`, so existing `except KeyError`
+  handlers still work.
+- **`sync(keys=[])` is an explicit no-op**, whereas a prefix or glob that *matches* nothing
+  raises `ValueError`. Passing an empty list says "sync nothing" on purpose; a pattern that
+  matched nothing probably means you mistyped it.
+- **`find_prefix` is not `glob(prefix + "*")`.** They return the same thing today, because
+  `fnmatch`'s `*` crosses `/` unlike `glob.glob`, but they are kept separate so a future change
+  to `glob()`'s semantics cannot silently change `find_prefix`.
+- `sync()` itself still returns `None` and, called with no arguments, still syncs everything.
 
 Verifying that the links were all created and match test_checkout/:
 ```

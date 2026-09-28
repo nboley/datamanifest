@@ -130,7 +130,8 @@ def add_url_main(manifest_fname, key, url, notes=""):
         print(f"Added {key}: md5={record.md5sum} size={record.size} etag={record.s3_hash or '(none)'}")
 
 
-def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
+def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False,
+              prefix=None, glob_pattern=None):
     # Check if any external records need md5sum backfill — requires writer access.
     with DataManifest(manifest_fname) as dm_reader:
         needs_writer = any(
@@ -143,7 +144,15 @@ def sync_main(manifest_fname, fast, progress_bar=True, skip_remote_check=False):
     else:
         dm = DataManifest(manifest_fname)
     with dm:
-        dm.sync(fast=fast, progress_bar=progress_bar, skip_remote_check=skip_remote_check)
+        if prefix:
+            dm.sync_prefix(prefix, fast=fast, progress_bar=progress_bar,
+                           skip_remote_check=skip_remote_check)
+        elif glob_pattern:
+            dm.sync_glob(glob_pattern, fast=fast, progress_bar=progress_bar,
+                         skip_remote_check=skip_remote_check)
+        else:
+            dm.sync(fast=fast, progress_bar=progress_bar,
+                    skip_remote_check=skip_remote_check)
 
 
 def checkout_main(manifest_fname, checkout_dir, sync=False, fast=False, progress_bar=True):
@@ -189,6 +198,15 @@ def parse_args():
     sync_subparser.add_argument(
         "--skip-remote-check", default=False, action="store_true",
         help="skip the remote ETag verification for external records"
+    )
+    sync_filter_group = sync_subparser.add_mutually_exclusive_group()
+    sync_filter_group.add_argument(
+        "--prefix", default=None,
+        help="sync only keys starting with PREFIX"
+    )
+    sync_filter_group.add_argument(
+        "--glob", default=None,
+        help="sync only keys matching GLOB pattern"
     )
 
     add_subparser = subparsers.add_parser("add", help="add a file to a manifest")
@@ -273,6 +291,7 @@ def main():
         sync_main(
             getattr(args, 'manifest-path'), args.fast, progress_bar=(not args.quiet),
             skip_remote_check=args.skip_remote_check,
+            prefix=args.prefix, glob_pattern=getattr(args, 'glob'),
         )
     elif args.command == "add":
         add_main(getattr(args, 'manifest-path'), args.key, args.path, args.notes)

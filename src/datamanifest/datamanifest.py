@@ -98,6 +98,11 @@ class InvalidPrefix(ValueError):
     pass
 
 
+class UnknownKeyError(KeyError):
+    """Raised when requested keys are not present in the manifest."""
+    pass
+
+
 def _stream_md5(readable):
     """Compute MD5 hex digest by reading in chunks."""
     md5 = hashlib.md5()
@@ -972,21 +977,51 @@ class DataManifest:
             self.validate_record(key, check_md5sum=(not fast))
         return self._data[key]
 
-    def sync(self, fast=False, progress_bar=False, skip_remote_check=False, max_workers=8):
-        """Sync the data manifest.
+    def sync(self, *, keys=None, fast=False, progress_bar=False, skip_remote_check=False, max_workers=8):
+        """Sync data manifest records to local cache and checkout.
 
-        If fast is set to True, then skip the md5sum check.
-        If skip_remote_check is True, skip the remote ETag verification for external records.
-        If max_workers > 1, sync records in parallel using a thread pool.
+        Args:
+            keys: If provided, sync only these keys. If None, sync all keys.
+                An empty list is an explicit no-op (no error, no downloads).
+                Keys not present in the manifest raise UnknownKeyError.
+            fast: Skip md5sum verification (size-only check).
+            progress_bar: Show tqdm progress bar.
+            skip_remote_check: Skip ETag drift detection for externals.
+            max_workers: Thread pool size for parallel downloads.
+
+        Raises:
+            UnknownKeyError: If any key in `keys` is not in the manifest.
+                Raised before any downloads start, listing all unknown keys.
+            RuntimeError: If any record fails to sync (after attempting all).
+
+        Note:
+            sync(keys=[]) is an explicit no-op — no error, no downloads.
+            This is distinct from sync_prefix/sync_glob, where an empty
+            match raises ValueError (a pattern matching nothing is likely
+            a typo). The asymmetry is intentional.
         """
-        keys = list(self.keys())
+        if keys is None:
+            target_keys = list(self.keys())
+        else:
+            target_keys = list(keys)
+            unknown = set(target_keys) - set(self._data.keys())
+            if unknown:
+                sample = sorted(unknown)[:10]
+                msg = f"{len(unknown)} key(s) not found in manifest '{self.fname}': {sample}"
+                if len(unknown) > 10:
+                    msg += f" (and {len(unknown) - 10} more)"
+                raise UnknownKeyError(msg)
+
+        if not target_keys:
+            return
+
         errors = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self.sync_record, key, fast=fast, skip_remote_check=skip_remote_check): key
-                for key in keys
+                for key in target_keys
             }
-            with tqdm(total=len(keys), disable=not progress_bar) as pbar:
+            with tqdm(total=len(target_keys), disable=not progress_bar) as pbar:
                 for future in as_completed(futures):
                     key = futures[future]
                     try:
@@ -997,8 +1032,58 @@ class DataManifest:
         if errors:
             error_details = "\n".join(f"  {key}: {type(e).__name__}: {e}" for key, e in errors)
             raise RuntimeError(
-                f"Failed to sync {len(errors)} record(s):\n{error_details}"
+                f"Failed to sync {len(errors)} of {len(target_keys)} record(s):\n{error_details}"
             )
+
+    def sync_prefix(self, prefix, *, fast=False, progress_bar=False, skip_remote_check=False, max_workers=8):
+        """Sync all keys starting with `prefix`.
+
+        Uses str.startswith (NOT glob(prefix + "*")). Returns the list of
+        matched keys.
+
+        Args:
+            prefix: Literal prefix string. Must be non-empty.
+
+        Returns:
+            List of matched keys.
+
+        Raises:
+            ValueError: If prefix is empty or no keys match.
+            RuntimeError: If any matched record fails to sync.
+        """
+        matched = self.find_prefix(prefix)  # raises ValueError on empty prefix
+        if not matched:
+            raise ValueError(
+                f"No keys match prefix '{prefix}' in manifest '{self.fname}' "
+                f"({len(self._data)} total keys)"
+            )
+        self.sync(
+            keys=matched, fast=fast, progress_bar=progress_bar,
+            skip_remote_check=skip_remote_check, max_workers=max_workers,
+        )
+        return matched
+
+    def sync_glob(self, pattern, *, fast=False, progress_bar=False, skip_remote_check=False, max_workers=8):
+        """Sync all keys matching an fnmatch glob pattern.
+
+        Equivalent to self.sync(keys=self.glob(pattern), ...).
+        Returns the list of matched keys.
+
+        Raises:
+            ValueError: If the pattern matches zero keys (likely a typo).
+            RuntimeError: If any matched record fails to sync.
+        """
+        matched = self.glob(pattern)
+        if not matched:
+            raise ValueError(
+                f"No keys match pattern '{pattern}' in manifest '{self.fname}' "
+                f"({len(self._data)} total keys)"
+            )
+        self.sync(
+            keys=matched, fast=fast, progress_bar=progress_bar,
+            skip_remote_check=skip_remote_check, max_workers=max_workers,
+        )
+        return matched
 
     def validate(self, fast=False):
         for key in self.keys():
@@ -1009,6 +1094,29 @@ class DataManifest:
 
     def glob_records(self, pattern, validate=True):
         return [self.get(k, validate=validate) for k in self.glob(pattern)]
+
+    def find_prefix(self, prefix):
+        """Return all keys starting with `prefix` (literal str.startswith filter).
+
+        This is NOT equivalent to glob(prefix + "*"). The two are kept separate
+        so that a future change to glob()'s semantics cannot silently alter
+        find_prefix().
+
+        Args:
+            prefix: Literal prefix string. Must be non-empty.
+
+        Returns:
+            List of matching keys.
+
+        Raises:
+            ValueError: If prefix is empty.
+        """
+        if not prefix:
+            raise ValueError(
+                "prefix must be non-empty (empty prefix matches all keys "
+                "via str.startswith — almost certainly a bug)"
+            )
+        return [k for k in self.keys() if k.startswith(prefix)]
 
 
 class DataManifestWriter(DataManifest):

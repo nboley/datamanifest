@@ -1,3 +1,3 @@
-from .datamanifest import DataManifestWriter, DataManifest
+from .datamanifest import DataManifestWriter, DataManifest, UnknownKeyError
 
-__all__ = ["DataManifestWriter", "DataManifest"]
+__all__ = ["DataManifestWriter", "DataManifest", "UnknownKeyError"]

@@ -201,15 +201,52 @@ class TestSyncKeys:
         dm.close()
 
     def test_sync_many_unknown_keys_truncated(self, tmpdir):
-        """When many keys are unknown, the message should be sensibly truncated."""
+        """Many unknown keys: report the true total, but do not enumerate all of them.
+
+        Asserted behaviourally rather than by message wording. The contract is "tell me how
+        many were wrong, and don't flood the message". The exact phrasing is not a contract,
+        so matching on it would break under a harmless reword while catching no regression.
+        """
         manifest_path = _create_test_manifest(tmpdir)
         dm = DataManifest(manifest_path)
         unknown = [f"bad_{i}" for i in range(25)]
         with pytest.raises(UnknownKeyError) as exc_info:
             dm.sync(keys=unknown)
         msg = str(exc_info.value)
-        assert "25 key(s) not found" in msg
-        assert "and 15 more" in msg
+        # the true total must appear, so the caller learns the real scale of the mistake
+        assert "25" in msg
+        # but it must NOT list all 25 -- truncation is the behaviour under test
+        listed = sum(1 for k in unknown if k in msg)
+        assert listed < len(unknown), f"message enumerated all {len(unknown)} keys"
+        assert listed > 0, "message should still show a sample of the offending keys"
+        dm.close()
+
+    def test_sync_returns_none(self, tmpdir):
+        """sync() returns None, unlike sync_prefix/sync_glob which return matched keys.
+
+        Gap found by the test audit: intent item 7 was only half-covered. The wrappers'
+        return values were asserted but sync()'s was not, so adding a return value to
+        sync() would have been a silent API change.
+        """
+        manifest_path = _create_test_manifest(tmpdir)
+        dm = DataManifest(manifest_path)
+        with patch.object(dm, 'sync_record', MagicMock()):
+            assert dm.sync(keys=["alpha/one.txt"]) is None
+            assert dm.sync(keys=[]) is None
+        dm.close()
+
+    def test_sync_glob_empty_pattern_raises(self, tmpdir):
+        """sync_glob("") raises ValueError through the no-match guard.
+
+        The spec guards find_prefix("")/sync_prefix("") explicitly but is silent on
+        sync_glob(""). fnmatch.filter(keys, "") matches nothing, so it lands on the
+        empty-match guard. Pinned here so the behaviour is deliberate, not incidental.
+        """
+        manifest_path = _create_test_manifest(tmpdir)
+        dm = DataManifest(manifest_path)
+        with patch.object(dm, 'sync_record', MagicMock()):
+            with pytest.raises(ValueError):
+                dm.sync_glob("")
         dm.close()
 
 

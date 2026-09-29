@@ -75,8 +75,17 @@ Python: >= 3.7
 ## Running Tests
 
 ```bash
-pytest --verbose .
+pytest --verbose tests/
 ```
+
+**Use `tests/`, not `.`.** A bare `pytest .` also collects test files left in the conda build
+tree under `output/`. Those are snapshots of an older suite and import names the module no
+longer exports, so collection aborts before a single test runs. It is a build artifact, not a
+code fault: `rm -rf output/` clears it, and the next `rattler-build` brings it straight back.
+Scoping to `tests/` avoids it permanently.
+
+As of 2026-09-29 the suite is **162 passed, 1 skipped** in ~40 s (101 `test_datamanifest` +
+32 `test_prefix_sync` + 19 `test_conflict_detection` + 4 `test_parallel_sync`).
 
 Tests require:
 - AWS credentials with access to the `karius-biomarker-data-assets` S3 bucket (**this is the live production assets bucket**, not a throwaway test bucket — tests create temporary S3 objects keyed by git hash + random string and clean them up, but failures or interruptions leave orphaned objects in production)
